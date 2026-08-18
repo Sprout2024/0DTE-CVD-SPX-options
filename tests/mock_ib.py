@@ -123,6 +123,12 @@ class MockIB:
         self.trades.append(t)
         return t
 
+    def modifyOrder(self, trade, new_order):
+        trade.order = new_order
+        if not trade.isDone():
+            asyncio.get_running_loop().call_later(0.2, lambda: self._fill(trade, new_order.lmtPrice))
+        return trade
+
     def _fill(self, trade, price):
         if trade.isDone():
             return

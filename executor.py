@@ -59,25 +59,67 @@ class Executor:
         snapped = math.floor(round(price / step, 6)) * step
         return round(snapped, 2)
 
+    @staticmethod
+    def _tick_step(price: float) -> float:
+        return 0.05 if price >= 3.00 else 0.10
+
+    @staticmethod
+    def _move_toward(price: float, target: float, step: float) -> float:
+        if target > price:
+            return round(min(target, price + step), 2)
+        return round(max(target, price - step), 2)
+
+    async def _walk_fill(self, combo: Contract, side: str, start: float, target: float,
+                         valid_seconds: float, quantity: int) -> Optional[Trade]:
+        """Place a limit order at ``start`` and walk 1 tick toward ``target`` every 5s.
+
+        SELL walks down to the bid, BUY walks up to the ask, so the order becomes
+        marketable and fills. Returns the filled Trade or None on timeout.
+        """
+        step = self._tick_step(start)
+        price = self._snap_tick(start)
+        order = LimitOrder(side, quantity, price)
+        order.tif = "DAY"
+        order.transmit = True
+        order.advancedErrorOverride = "COMBOPAYOUT"
+        trade = self.ib.placeOrder(combo, order)
+        self._log.info("%s %s @ %.2f, walking toward %.2f (step %.2f)", side, quantity, price, target, step)
+        t0 = time.time()
+        next_move = t0 + 5.0
+        while time.time() - t0 < valid_seconds:
+            if trade.isDone():
+                break
+            if time.time() >= next_move:
+                next_move += 5.0
+                np_ = self._snap_tick(self._move_toward(price, target, step))
+                if np_ != price:
+                    price = np_
+                    mo = LimitOrder(side, quantity, price)
+                    mo.tif = "DAY"
+                    mo.transmit = True
+                    mo.advancedErrorOverride = "COMBOPAYOUT"
+                    self.ib.modifyOrder(trade, mo)
+                    self._log.info("walk %s -> %.2f", side, price)
+            await asyncio.sleep(0.2)
+        if not trade.isDone():
+            self.ib.cancelOrder(order)
+            self._log.warning("%s order not filled after walk, cancelled (last %.2f)", side, price)
+            return None
+        if not trade.fills:
+            self._log.warning("%s order done without fills", side)
+            return None
+        return trade
+
     async def open_position(self, spread: Spread, credit: float, signal: Signal) -> Optional[Position]:
         if credit is None or credit <= 0:
             self._log.warning("no spread mid available, skip entry")
             return None
-        price = self._snap_tick(credit)
-        order = LimitOrder("SELL", spread.quantity, price)
-        order.tif = "DAY"
-        order.transmit = True
-        order.advancedErrorOverride = "COMBOPAYOUT"
-        trade = self.ib.placeOrder(spread.combo, order)
-        self._log.info("entry SELL %s @ mid %.2f (%s)", spread.quantity, price, spread.direction)
-        ok = await self._wait(trade, self.cfg.entry_valid_seconds)
-        if not ok:
-            if not trade.isDone():
-                self.ib.cancelOrder(order)
+        bid = self.selector.spread_bid(spread)
+        target = bid if bid is not None else credit
+        trade = await self._walk_fill(spread.combo, "SELL", credit, target,
+                                      self.cfg.entry_valid_seconds, spread.quantity)
+        if trade is None:
             self._log.warning("entry not filled, cancelled")
-            return None
-        if not trade.fills:
-            self._log.warning("entry marked done without fills")
             return None
         avg = sum(f.execution.price for f in trade.fills) / len(trade.fills)
         self._seq += 1
@@ -106,21 +148,12 @@ class Executor:
         if credit is None or credit <= 0:
             self._log.warning("no iron-condor mid available, skip entry")
             return None
-        price = self._snap_tick(credit)
-        order = LimitOrder("SELL", condor.quantity, price)
-        order.tif = "DAY"
-        order.transmit = True
-        order.advancedErrorOverride = "COMBOPAYOUT"
-        trade = self.ib.placeOrder(condor.combo, order)
-        self._log.info("iron-condor entry SELL %s @ mid %.2f", condor.quantity, price)
-        ok = await self._wait(trade, self.cfg.entry_valid_seconds)
-        if not ok:
-            if not trade.isDone():
-                self.ib.cancelOrder(order)
+        bid = self.selector.iron_condor_bid(condor)
+        target = bid if bid is not None else credit
+        trade = await self._walk_fill(condor.combo, "SELL", credit, target,
+                                      self.cfg.entry_valid_seconds, condor.quantity)
+        if trade is None:
             self._log.warning("iron-condor entry not filled, cancelled")
-            return None
-        if not trade.fills:
-            self._log.warning("iron-condor entry marked done without fills")
             return None
         avg = sum(f.execution.price for f in trade.fills) / len(trade.fills)
         self._seq += 1
@@ -318,15 +351,18 @@ class Executor:
         if value is None:
             await self._market_close(pos)
             return
-        price = self._snap_tick(value)
-        order = LimitOrder("BUY", pos.quantity, price)
-        order.tif = "DAY"
-        order.transmit = True
-        order.advancedErrorOverride = "COMBOPAYOUT"
-        trade = self.ib.placeOrder(self._combo(pos), order)
-        pos.close_trade = trade
-        pos.close_time = time.time()
-        self._log.info("position %s close %s order BUY @ mid %.2f", pos.id, kind, price)
+        if pos.condor is not None:
+            ask = self.selector.iron_condor_ask(pos.condor)
+        else:
+            ask = self.selector.spread_ask(pos.spread)
+        target = ask if ask is not None else value
+        trade = await self._walk_fill(self._combo(pos), "BUY", value, target,
+                                      self.cfg.close_patience_seconds * 4, pos.quantity)
+        if trade is None:
+            self._log.warning("position %s %s close not filled after walk, escalating", pos.id, kind)
+            await self._market_close(pos)
+            return
+        self._finalize_close(pos, trade)
 
     async def _market_close(self, pos: Position) -> None:
         value = self._pos_value(pos)

@@ -292,6 +292,18 @@ class OptionSelector:
         lp_mid = (qs[3].bid + qs[3].ask) / 2.0
         return round((sc_mid - lc_mid) + (sp_mid - lp_mid), 2)
 
+    def iron_condor_bid(self, condor: IronCondor) -> Optional[float]:
+        qs = [self._live_tickers.get(o.conId) for o in (condor.short_call, condor.long_call, condor.short_put, condor.long_put)]
+        if any(t is None or not self._has_bid_ask(t) for t in qs):
+            return None
+        return round((qs[0].bid - qs[1].ask) + (qs[2].bid - qs[3].ask), 2)
+
+    def iron_condor_ask(self, condor: IronCondor) -> Optional[float]:
+        qs = [self._live_tickers.get(o.conId) for o in (condor.short_call, condor.long_call, condor.short_put, condor.long_put)]
+        if any(t is None or not self._has_bid_ask(t) for t in qs):
+            return None
+        return round((qs[0].ask - qs[1].bid) + (qs[2].ask - qs[3].bid), 2)
+
     def iron_condor_legs(self, condor: IronCondor) -> List[Option]:
         return [condor.short_call, condor.long_call, condor.short_put, condor.long_put]
 

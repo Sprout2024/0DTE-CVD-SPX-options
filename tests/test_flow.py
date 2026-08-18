@@ -58,10 +58,6 @@ async def test_executor_open_close():
             t.bid = 0.10
             t.ask = 0.20
     await execr.manage(592.0, None)
-    pos.close_trade._fill_after = 0  # ensure fill pending
-    for _ in range(3):
-        await asyncio.sleep(0.1)
-        await execr.manage(592.0, None)
     assert pos.status == "CLOSED", pos.status
     print("closed, pnl:", pos.realized_pnl, "kind:", pos.close_kind)
 
