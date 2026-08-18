@@ -8,6 +8,7 @@ from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
 from ib_insync import IB, ComboLeg, Contract, LimitOrder, MarketOrder, Option, Trade
+from ib_insync.objects import TagValue
 
 from config import Config
 from cvd_engine import Bar, Signal
@@ -64,50 +65,31 @@ class Executor:
         return 0.05 if price >= 3.00 else 0.10
 
     @staticmethod
-    def _move_toward(price: float, target: float, step: float) -> float:
-        if target > price:
-            return round(min(target, price + step), 2)
-        return round(max(target, price - step), 2)
-
-    async def _walk_fill(self, combo: Contract, side: str, start: float, target: float,
-                         valid_seconds: float, quantity: int) -> Optional[Trade]:
-        """Place a limit order at ``start`` and walk 1 tick toward ``target`` every 5s.
-
-        SELL walks down to the bid, BUY walks up to the ask, so the order becomes
-        marketable and fills. Returns the filled Trade or None on timeout.
-        """
-        step = self._tick_step(start)
-        price = self._snap_tick(start)
+    def _adaptive_limit(side: str, quantity: int, price: float, urgency: str) -> LimitOrder:
+        """Build an IBKR Adaptive Limit order (auto-seeks fills between bid/ask)."""
         order = LimitOrder(side, quantity, price)
         order.tif = "DAY"
         order.transmit = True
         order.advancedErrorOverride = "COMBOPAYOUT"
+        order.algoStrategy = "Adaptive"
+        order.algoParams = [TagValue("adaptivePriority", urgency)]
+        return order
+
+    async def _adaptive_fill(self, combo: Contract, side: str, price: float,
+                             valid_seconds: float, quantity: int, urgency: str) -> Optional[Trade]:
+        """Place an IBKR Adaptive Limit order and wait for fill.
+
+        ``urgency`` = "Patient" | "Normal" | "Urgent" (entry=Normal, exit=Urgent).
+        Returns the filled Trade or None on timeout.
+        """
+        order = self._adaptive_limit(side, quantity, self._snap_tick(price), urgency)
         trade = self.ib.placeOrder(combo, order)
-        self._log.info("%s %s @ %.2f, walking toward %.2f (step %.2f)", side, quantity, price, target, step)
-        t0 = time.time()
-        next_move = t0 + 5.0
-        while time.time() - t0 < valid_seconds:
-            if trade.isDone():
-                break
-            if time.time() >= next_move:
-                next_move += 5.0
-                np_ = self._snap_tick(self._move_toward(price, target, step))
-                if np_ != price:
-                    price = np_
-                    mo = LimitOrder(side, quantity, price)
-                    mo.tif = "DAY"
-                    mo.transmit = True
-                    mo.advancedErrorOverride = "COMBOPAYOUT"
-                    if hasattr(self.ib, "modifyOrder"):
-                        self.ib.modifyOrder(trade, mo)
-                    else:
-                        trade.order.lmtPrice = price
-                        self.ib.placeOrder(trade.contract, trade.order)
-                    self._log.info("walk %s -> %.2f", side, price)
-            await asyncio.sleep(0.2)
-        if not trade.isDone():
-            self.ib.cancelOrder(order)
-            self._log.warning("%s order not filled after walk, cancelled (last %.2f)", side, price)
+        self._log.info("%s %s @ %.2f (adaptive %s)", side, quantity, order.lmtPrice, urgency)
+        ok = await self._wait(trade, valid_seconds)
+        if not ok:
+            if not trade.isDone():
+                self.ib.cancelOrder(order)
+            self._log.warning("%s order not filled (adaptive %s), cancelled", side, urgency)
             return None
         if not trade.fills:
             self._log.warning("%s order done without fills", side)
@@ -118,10 +100,8 @@ class Executor:
         if credit is None or credit <= 0:
             self._log.warning("no spread mid available, skip entry")
             return None
-        bid = self.selector.spread_bid(spread)
-        target = bid if bid is not None else credit
-        trade = await self._walk_fill(spread.combo, "SELL", credit, target,
-                                      self.cfg.entry_valid_seconds, spread.quantity)
+        trade = await self._adaptive_fill(spread.combo, "SELL", credit,
+                                          self.cfg.entry_valid_seconds, spread.quantity, "Normal")
         if trade is None:
             self._log.warning("entry not filled, cancelled")
             return None
@@ -152,10 +132,8 @@ class Executor:
         if credit is None or credit <= 0:
             self._log.warning("no iron-condor mid available, skip entry")
             return None
-        bid = self.selector.iron_condor_bid(condor)
-        target = bid if bid is not None else credit
-        trade = await self._walk_fill(condor.combo, "SELL", credit, target,
-                                      self.cfg.entry_valid_seconds, condor.quantity)
+        trade = await self._adaptive_fill(condor.combo, "SELL", credit,
+                                          self.cfg.entry_valid_seconds, condor.quantity, "Normal")
         if trade is None:
             self._log.warning("iron-condor entry not filled, cancelled")
             return None
@@ -355,15 +333,10 @@ class Executor:
         if value is None:
             await self._market_close(pos)
             return
-        if pos.condor is not None:
-            ask = self.selector.iron_condor_ask(pos.condor)
-        else:
-            ask = self.selector.spread_ask(pos.spread)
-        target = ask if ask is not None else value
-        trade = await self._walk_fill(self._combo(pos), "BUY", value, target,
-                                      self.cfg.close_patience_seconds * 4, pos.quantity)
+        trade = await self._adaptive_fill(self._combo(pos), "BUY", value,
+                                          self.cfg.close_patience_seconds * 4, pos.quantity, "Urgent")
         if trade is None:
-            self._log.warning("position %s %s close not filled after walk, escalating", pos.id, kind)
+            self._log.warning("position %s %s close not filled (adaptive), escalating", pos.id, kind)
             await self._market_close(pos)
             return
         self._finalize_close(pos, trade)
@@ -371,12 +344,9 @@ class Executor:
     async def _market_close(self, pos: Position) -> None:
         value = self._pos_value(pos)
         if value is not None:
-            price = self._snap_tick(value)
-            order = LimitOrder("BUY", pos.quantity, price)
-            order.tif = "DAY"
-            order.advancedErrorOverride = "COMBOPAYOUT"
+            order = self._adaptive_limit("BUY", pos.quantity, value, "Urgent")
             trade = self.ib.placeOrder(self._combo(pos), order)
-            self._log.info("position %s close %s @ mid %.2f", pos.id, pos.close_kind or "MANUAL", price)
+            self._log.info("position %s close %s @ %.2f (adaptive urgent)", pos.id, pos.close_kind or "MANUAL", order.lmtPrice)
             ok = await self._wait(trade, 8)
             if ok:
                 self._finalize_close(pos, trade)
