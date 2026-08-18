@@ -45,6 +45,7 @@ async def test_backtest_tick():
     cfg = Config(
         divergence_lookback=3,
         min_ticks_per_bar=1,
+        regime_filter=False,
         cooldown_seconds=0,
         profit_time_seconds=120,
         hard_time_seconds=300,
@@ -78,6 +79,7 @@ async def test_backtest_bar_proxy():
     cfg = Config(
         divergence_lookback=3,
         min_ticks_per_bar=1,
+        regime_filter=False,
         cooldown_seconds=0,
         spot_scale=1.0,
         spread_width=5.0,
@@ -101,6 +103,7 @@ async def test_backtest_hybrid():
     cfg = Config(
         divergence_lookback=3,
         min_ticks_per_bar=1,
+        regime_filter=False,
         cooldown_seconds=0,
         spot_scale=1.0,
         spread_width=5.0,
@@ -153,9 +156,43 @@ async def test_minute_deltas():
     print("OK minute_deltas")
 
 
+async def test_backtest_condor():
+    """regime_filter=True -> range regime opens iron condors, trend regimes skip."""
+    cfg = Config(
+        divergence_lookback=3,
+        min_ticks_per_bar=1,
+        cooldown_seconds=0,
+        spot_scale=13.0,
+        spread_width=5.0,
+        iron_condor_offset=30.0,
+        iron_condor_wing=25.0,
+        iron_condor_take_profit_pct=0.70,
+        iron_condor_stop_loss_pct=0.50,
+        min_entry_credit=0.10,
+        max_entry_credit=30.00,
+        regime_filter=True,
+        trend_lookback_hours=4,
+        trend_slope_threshold=5.0,
+        log_level="INFO",
+        log_file="",
+    )
+    ticks = make_day_ticks()
+    bt = Backtester(cfg, OptionPricer(iv=0.20), log=__import__("logging").getLogger("btc"))
+    bt.strikes = [round(450 + i * 1.0, 1) for i in range(400)]
+    bt.run_ticks(ticks)
+    # insufficient hourly data -> regime "range" -> iron condor trade(s), no spread
+    stats = bt.report()
+    print("condor-mode stats:", {k: v for k, v in stats.items() if k != "equity_curve"})
+    assert stats["trades"] >= 1, f"expected condor trades, got {stats}"
+    assert all(t["direction"] == "range" for t in bt.trades)
+    assert all(t["cost"] == 6.40 for t in bt.trades), [t["cost"] for t in bt.trades]
+    print("OK backtest condor mode")
+
+
 if __name__ == "__main__":
     asyncio.run(test_backtest_tick())
     asyncio.run(test_backtest_bar_proxy())
     asyncio.run(test_backtest_hybrid())
     asyncio.run(test_minute_deltas())
+    asyncio.run(test_backtest_condor())
     print("ALL BACKTEST TESTS PASSED")

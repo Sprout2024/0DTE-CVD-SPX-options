@@ -38,6 +38,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--cache", default="", help="pickle cache file for fetched ticks/bars (save or load)")
     p.add_argument("--offline", action="store_true", help="run from cache without connecting to IB")
     p.add_argument("--spot-scale", type=float, default=None, help="scale signal spot to option spot (default: cfg.spot_scale; 10.0 when replaying cached SPY ticks for SPX)")
+    p.add_argument("--no-regime-filter", action="store_true", help="disable trend regime gate (range->iron condor, trend->no trade); default ON")
     p.add_argument("--log-level", default="INFO")
     return p.parse_args()
 
@@ -95,6 +96,7 @@ async def main(args: argparse.Namespace) -> int:
         contracts=args.contracts,
         commission_per_contract=args.commission,
         exchange_fee_per_contract=args.exchange_fee,
+        regime_filter=not args.no_regime_filter,
     )
     setup_logging(cfg)
     log = logging.getLogger("backtest-run")

@@ -67,8 +67,11 @@ python -m venv .venv
 ### 回测
 
 ```bash
-# tick 模式（真实 BID_ASK/TRADES CVD）
-.venv/bin/python run_backtest.py --days 3 --data tick --cache bt.pkl
+# 默认开启趋势门控（range→Iron Condor，趋势日→空仓），与实盘一致
+.venv/bin/python run_backtest.py --days 3 --data bar --cache bt.pkl
+
+# 关闭趋势门控（恢复方向性垂直价差）
+.venv/bin/python run_backtest.py --days 3 --data tick --cache bt.pkl --no-regime-filter
 
 # hybrid 模式（bar 代理 + 极值分钟精确 tick）
 .venv/bin/python run_backtest.py --days 3 --data hybrid --cache bt.pkl
@@ -76,6 +79,8 @@ python -m venv .venv
 # 离线回放缓存
 .venv/bin/python run_backtest.py --offline --cache bt.pkl
 ```
+
+> 默认 `regime_filter` 开启：震荡日开铁鹰、趋势日空仓（与 `strategy.py` 一致）；加 `--no-regime-filter` 回退到方向性价差。
 
 ### 多天信号统计
 

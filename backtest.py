@@ -6,6 +6,8 @@ from math import exp, log, sqrt
 from statistics import NormalDist
 from typing import Dict, List, Optional, Tuple
 
+from trend import TrendDetector
+
 N = NormalDist().cdf
 
 
@@ -90,6 +92,7 @@ class Backtester:
         self.pricer = pricer
         self.log = log or logging.getLogger("backtest")
         self.engine = None
+        self.trend = TrendDetector(cfg)
         self.trades: List[Dict] = []
         self.pos: Optional[Dict] = None
         self.strikes: List[float] = []
@@ -101,12 +104,21 @@ class Backtester:
         from cvd_engine import CvdEngine
 
         self.engine = CvdEngine(self.cfg)
+        self.trend = TrendDetector(self.cfg)
         self.pos = None
 
     def _round_trip_cost(self) -> float:
         """Commission + exchange fees to open and close a spread (2 legs)."""
         c = self.cfg.contracts
         legs = 2
+        comm = max(self.cfg.min_commission_per_order, self.cfg.commission_per_contract * c * legs)
+        fee = self.cfg.exchange_fee_per_contract * c * legs
+        return round((comm + fee) * 2, 2)
+
+    def _condor_cost(self) -> float:
+        """Commission + exchange fees to open and close an iron condor (4 legs)."""
+        c = self.cfg.contracts
+        legs = 4
         comm = max(self.cfg.min_commission_per_order, self.cfg.commission_per_contract * c * legs)
         fee = self.cfg.exchange_fee_per_contract * c * legs
         return round((comm + fee) * 2, 2)
@@ -129,6 +141,7 @@ class Backtester:
         if credit < self.cfg.min_entry_credit or credit > self.cfg.max_entry_credit:
             return False
         self.pos = {
+            "kind": "spread",
             "direction": signal.direction,
             "sell_strike": sell_strike,
             "buy_strike": buy_strike,
@@ -147,9 +160,55 @@ class Backtester:
         )
         return True
 
+    def _snap5(self, v: float) -> float:
+        return int(round(v / 5.0)) * 5
+
+    def _open_condor(self, signal, ts, spot) -> bool:
+        if self.pos is not None:
+            return False
+        c = self.cfg
+        op = self._op_spot(spot)
+        sc = self._snap5(op + c.iron_condor_offset)
+        lc = self._snap5(op + c.iron_condor_offset + c.iron_condor_wing)
+        sp = self._snap5(op - c.iron_condor_offset)
+        lp = self._snap5(op - c.iron_condor_offset - c.iron_condor_wing)
+        credit = round(
+            self.pricer.spread_mid("bear", sc, lc, op, ts) + self.pricer.spread_mid("bull", sp, lp, op, ts), 2
+        )
+        if credit <= 0 or credit < c.min_entry_credit or credit > c.max_entry_credit:
+            return False
+        self.pos = {
+            "kind": "condor",
+            "direction": "range",
+            "sc": sc, "lc": lc, "sp": sp, "lp": lp,
+            "entry_ts": ts,
+            "entry_spot": spot,
+            "entry_credit": credit,
+            "tp_target": round(credit * (1.0 - c.iron_condor_take_profit_pct), 2),
+            "sl_price": round(credit * (1.0 + c.iron_condor_stop_loss_pct), 2),
+            "signal_extreme": signal.extreme,
+            "signal_cvd": signal.cvd_extreme,
+            "entry_idx": len(self.trades),
+        }
+        self.log.info(
+            "OPEN CONDOR sc=%s lc=%s sp=%s lp=%s spot=%.2f credit=%.2f",
+            sc, lc, sp, lp, spot, credit,
+        )
+        return True
+
+    def _condor_value(self, pos, spot, ts) -> float:
+        op = self._op_spot(spot)
+        return round(
+            self.pricer.spread_mid("bear", pos["sc"], pos["lc"], op, ts)
+            + self.pricer.spread_mid("bull", pos["sp"], pos["lp"], op, ts), 2
+        )
+
     def _manage_tick(self, ts, spot) -> None:
         pos = self.pos
         if pos is None:
+            return
+        if pos["kind"] == "condor":
+            self._manage_condor(ts, spot)
             return
         held = (ts - pos["entry_ts"]).total_seconds()
         mid = self.pricer.spread_mid(
@@ -198,6 +257,42 @@ class Backtester:
         )
         self.pos = None
 
+    def _manage_condor(self, ts, spot) -> None:
+        pos = self.pos
+        if pos is None:
+            return
+        value = self._condor_value(pos, spot, ts)
+        kind = None
+        if value >= pos["sl_price"]:
+            kind = "SL"
+            close_price = value
+        elif value <= pos["tp_target"]:
+            kind = "TP"
+            close_price = value
+        if kind is None:
+            return
+        gross = (pos["entry_credit"] - close_price) * 100.0 * self.cfg.contracts
+        cost = self._condor_cost()
+        pnl = round(gross - cost, 2)
+        self.trades.append(
+            {
+                "direction": "range",
+                "sell_strike": pos["sc"],
+                "buy_strike": pos["sp"],
+                "entry_time": pos["entry_ts"],
+                "exit_time": ts,
+                "entry_credit": pos["entry_credit"],
+                "exit_price": close_price,
+                "kind": kind,
+                "gross_pnl": round(gross, 2),
+                "cost": cost,
+                "pnl": pnl,
+                "held_sec": round((ts - pos["entry_ts"]).total_seconds(), 1),
+            }
+        )
+        self.log.info("CLOSE CONDOR kind=%s exit=%.2f pnl=%.2f", kind, close_price, pnl)
+        self.pos = None
+
     def _tech_stop(self, pos, ts, spot) -> bool:
         bar = self.engine.last_bar() if self.engine else None
         if bar is None:
@@ -208,7 +303,6 @@ class Backtester:
         return spot < pos["signal_extreme"] - buf and bar.cvd_delta < 0 and bar.cvd_close < pos["signal_cvd"]
 
     def _signal(self) -> bool:
-        now = None
         if self.pos is not None:
             return False
         sig = self.engine.detect_signal()
@@ -218,6 +312,12 @@ class Backtester:
             return False
         self._last_signal = sig.extreme
         self._last_signal_time = sig.bar.ts
+        if self.cfg.regime_filter:
+            regime = self.trend.regime()
+            if regime != "range":
+                self.log.info("signal %s skipped (trend %s, no trade)", sig.direction, regime)
+                return False
+            return self._open_condor(sig, sig.bar.ts, sig.bar.close)
         return self._open(sig, sig.bar.ts, sig.bar.close)
 
     def run_ticks(self, ticks: List[Tuple]) -> None:
@@ -227,6 +327,7 @@ class Backtester:
         for ts, price, delta in ticks:
             bar = self.engine.add_trade(price, 1.0, delta, ts)
             if bar is not None:
+                self.trend.update(bar)
                 self._signal()
             if self.pos is not None:
                 self._manage_tick(ts, price)
@@ -286,6 +387,7 @@ class Backtester:
                 cvd_delta=round(delta_proxy, 4),
             )
             self.engine.ingest_bar(bar)
+            self.trend.update(bar)
             self._signal()
             if self.pos is not None:
                 self._manage_tick(ts, c)
@@ -297,21 +399,27 @@ class Backtester:
         pos = self.pos
         if pos is None:
             return
-        mid = self.pricer.spread_mid(
-            pos["direction"], pos["sell_strike"], pos["buy_strike"], self._op_spot(spot), ts
-        )
-        gross = (pos["entry_credit"] - mid) * 100.0 * self.cfg.contracts
-        cost = self._round_trip_cost()
+        if pos["kind"] == "condor":
+            value = self._condor_value(pos, spot, ts)
+            cost = self._condor_cost()
+            sell, buy = pos["sc"], pos["sp"]
+        else:
+            value = self.pricer.spread_mid(
+                pos["direction"], pos["sell_strike"], pos["buy_strike"], self._op_spot(spot), ts
+            )
+            cost = self._round_trip_cost()
+            sell, buy = pos["sell_strike"], pos["buy_strike"]
+        gross = (pos["entry_credit"] - value) * 100.0 * self.cfg.contracts
         pnl = round(gross - cost, 2)
         self.trades.append(
             {
                 "direction": pos["direction"],
-                "sell_strike": pos["sell_strike"],
-                "buy_strike": pos["buy_strike"],
+                "sell_strike": sell,
+                "buy_strike": buy,
                 "entry_time": pos["entry_ts"],
                 "exit_time": ts,
                 "entry_credit": pos["entry_credit"],
-                "exit_price": mid,
+                "exit_price": value,
                 "kind": "EOD",
                 "gross_pnl": round(gross, 2),
                 "cost": cost,
