@@ -48,7 +48,6 @@ class Strategy:
         self._index_spot: Optional[float] = None
         self._last_signal: Optional[Signal] = None
         self._entry_task: Optional[asyncio.Task] = None
-        self.cooldown_until = 0.0
         self._last_breakout_ts = 0.0
         self.running = True
         self._tickers_subscribed = False
@@ -208,10 +207,6 @@ class Strategy:
                 f.write(json.dumps(rec, default=str) + "\n")
 
     def _on_signal(self, signal: Signal) -> None:
-        now = time.time()
-        if now < self.cooldown_until:
-            self._log.info("signal %s in cooldown", signal.direction)
-            return
         if self.executor.has_open_position():
             return
         if self._entry_task is not None and not self._entry_task.done():
@@ -248,7 +243,7 @@ class Strategy:
                         return
                     pos = await self.executor.open_iron_condor(condor, credit, signal)
                     if pos is None:
-                        self.cooldown_until = time.time() + self.cfg.cooldown_seconds
+                        self._log.warning("iron condor entry failed")
                     return
                 self._log.info("signal %s skipped (trend %s, no trade)", signal.direction, regime)
                 return
@@ -265,12 +260,11 @@ class Strategy:
                 return
             pos = await self.executor.open_position(spread, credit, signal)
             if pos is None:
-                self.cooldown_until = time.time() + self.cfg.cooldown_seconds
+                self._log.warning("spread entry failed")
         except asyncio.CancelledError:
             raise
         except Exception as e:
             self._log.exception("execute signal failed: %s", e)
-            self.cooldown_until = time.time() + self.cfg.cooldown_seconds
 
     def _shift(self, t: dtime, minutes: int) -> dtime:
         """Shift a time-of-day by +/- minutes (helper for no-trade windows)."""

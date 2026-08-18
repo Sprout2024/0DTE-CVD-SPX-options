@@ -98,7 +98,11 @@ class Executor:
                     mo.tif = "DAY"
                     mo.transmit = True
                     mo.advancedErrorOverride = "COMBOPAYOUT"
-                    self.ib.modifyOrder(trade, mo)
+                    if hasattr(self.ib, "modifyOrder"):
+                        self.ib.modifyOrder(trade, mo)
+                    else:
+                        trade.order.lmtPrice = price
+                        self.ib.placeOrder(trade.contract, trade.order)
                     self._log.info("walk %s -> %.2f", side, price)
             await asyncio.sleep(0.2)
         if not trade.isDone():
