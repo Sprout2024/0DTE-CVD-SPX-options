@@ -1,0 +1,9 @@
+.venv/
+__pycache__/
+*.pyc
+*.log
+.DS_Store
+*.json
+*.jsonl
+*.pkl
+.analysis_cache/
