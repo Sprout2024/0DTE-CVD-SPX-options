@@ -73,5 +73,6 @@ class Config:
 
     log_level: str = "INFO"
     log_file: str = "cvd_strategy.log"
-    state_file: str = "cvd_state.jsonl"
+    state_file: str = "data/cvd_state.jsonl"
+    signals_file: str = "data/signals.jsonl"
     reconnect_retry_seconds: float = 5.0

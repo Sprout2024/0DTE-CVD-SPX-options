@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import math
+import os
 import time
 from datetime import datetime, time as dtime
 from typing import List, Optional
@@ -145,6 +146,7 @@ class Strategy:
                 self._last_spot = price
                 bar = self.engine.add_trade(price, size, delta, tick.time)
                 if bar is not None:
+                    bar.iv = round(self.engine.realized_iv(), 4)
                     self.store.append_bar(bar)
                     self._on_new_bar(bar)
 
@@ -152,7 +154,27 @@ class Strategy:
         self.trend.update(bar)
         signal = self.engine.detect_signal()
         if signal is not None:
+            self._record_signal(signal)
             self._on_signal(signal)
+
+    def _record_signal(self, signal: Signal) -> None:
+        """Append every detected signal to the signals file for later analysis."""
+        import json
+
+        rec = {
+            "ts": signal.bar.ts.isoformat(),
+            "direction": signal.direction,
+            "regime": self.trend.regime(),
+            "extreme": signal.extreme,
+            "cvd_extreme": signal.cvd_extreme,
+        }
+        path = self.cfg.signals_file
+        if path:
+            parent = os.path.dirname(path)
+            if parent:
+                os.makedirs(parent, exist_ok=True)
+            with open(path, "a") as f:
+                f.write(json.dumps(rec, default=str) + "\n")
 
     def _on_signal(self, signal: Signal) -> None:
         now = time.time()

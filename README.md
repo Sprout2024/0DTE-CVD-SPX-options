@@ -60,7 +60,8 @@ python -m venv .venv
 ```
 
 - `--market-data-type 1` = 实时（需已订阅 `US Securities Snapshot and Futures Value Bundle`）
-- `--state-file cvd_state.jsonl` 状态持久化文件（重启/断线后恢复 CVD 与持仓）
+- `--state-file data/cvd_state.jsonl` 状态持久化文件（重启/断线后恢复 CVD 与持仓）
+- `--signals-file data/signals.jsonl` 检测到的信号日志（含趋势类型/时间/方向）
 - 运行中 `kill <pid>`（SIGTERM）会优雅平仓退出；断线自动重连
 
 ### 回测
@@ -116,8 +117,12 @@ python -m venv .venv
 
 ## 状态持久化
 
-`cvd_state.jsonl`（已 gitignore）逐行记录：
-- `{"k":"bar",...}` 每分钟已完成 bar（含 CVD 累计值）
-- `{"k":"pos",...}` / `{"k":"pos_done"}` 开仓 / 平仓
+数据文件统一存于 `data/`（已 gitignore）：
+
+- **`data/cvd_state.jsonl`**（`--state-file`）逐行记录：
+  - `{"k":"bar",...}` 每分钟已完成 bar（含 CVD 累计值 + **`iv`**（年化已实现波动率代理））
+  - `{"k":"pos",...}` / `{"k":"pos_done"}` 开仓 / 平仓
+- **`data/signals.jsonl`**（`--signals-file`）逐行记录每个检测到的信号：
+  - `{"ts","direction"(bull/bear),"regime"(up/down/range),"extreme","cvd_extreme"}`
 
 重启 / 断线重连时回放当日 bar 重建 CVD，并从 IBKR 同步未跟踪持仓（孤儿持仓自动市价平掉）。

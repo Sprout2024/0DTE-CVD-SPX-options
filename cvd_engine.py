@@ -21,6 +21,7 @@ class Bar:
     cvd_low: float = 0.0
     cvd_close: float = 0.0
     cvd_delta: float = 0.0
+    iv: float = 0.0
 
     def update(self, price: float, size: float, total_delta: float) -> None:
         self.ticks += 1
@@ -134,3 +135,17 @@ class CvdEngine:
 
     def running_delta(self) -> float:
         return self._total_delta
+
+    def realized_iv(self, lookback: int = 20) -> float:
+        """Annualized realized volatility (IV proxy) from recent 1-min close returns."""
+        if len(self.bars) < 2:
+            return 0.0
+        window = self.bars[-lookback:]
+        rets = [window[i].close / window[i - 1].close - 1.0 for i in range(1, len(window))]
+        if not rets:
+            return 0.0
+        m = sum(rets) / len(rets)
+        var = sum((r - m) ** 2 for r in rets) / len(rets)
+        std = var ** 0.5
+        bars_per_year = 252.0 * 6.5 * 60.0
+        return std * (bars_per_year ** 0.5)

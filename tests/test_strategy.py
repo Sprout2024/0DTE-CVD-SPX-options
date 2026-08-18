@@ -89,6 +89,7 @@ async def test_full_strategy():
             log_level="INFO",
             log_file="",
             state_file=str(Path(tmp) / "state.jsonl"),
+            signals_file="",
         )
         ib = MockIB(spot=592.0)
         setup_logging(cfg)
@@ -179,7 +180,7 @@ async def test_regime_gate():
         spread_width=5.0, strike_band=12.0,
         min_entry_credit=0.10, max_entry_credit=3.00,
         cooldown_seconds=0, regime_filter=True,
-        log_level="INFO", log_file="",
+        log_level="INFO", log_file="", signals_file="",
     )
 
     # uptrend: bear signal must be skipped

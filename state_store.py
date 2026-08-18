@@ -32,6 +32,9 @@ class CvdStore:
 
     def __init__(self, path: str):
         self.path = path
+        parent = os.path.dirname(path)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
         self._prune()
 
     def _prune(self) -> None:
@@ -78,6 +81,7 @@ class CvdStore:
                 "v": bar.volume, "n": bar.ticks,
                 "co": bar.cvd_open, "ch": bar.cvd_high, "cl": bar.cvd_low,
                 "cc": bar.cvd_close, "cd": bar.cvd_delta,
+                "iv": bar.iv,
             }
         )
 
@@ -147,4 +151,5 @@ class CvdStore:
             volume=rec["v"], ticks=rec["n"],
             cvd_open=rec["co"], cvd_high=rec["ch"], cvd_low=rec["cl"],
             cvd_close=rec["cc"], cvd_delta=rec["cd"],
+            iv=rec.get("iv", 0.0),
         )

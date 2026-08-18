@@ -22,7 +22,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--market-data-type", type=int, default=1, help="1=realtime, 3=delayed")
     p.add_argument("--log-level", default="INFO", help="DEBUG, INFO, WARNING, ERROR")
     p.add_argument("--no-log-file", action="store_true", help="disable file logging")
-    p.add_argument("--state-file", default="cvd_state.jsonl", help="CVD bar / position state file")
+    p.add_argument("--state-file", default="data/cvd_state.jsonl", help="CVD bar / position state file")
+    p.add_argument("--signals-file", default="data/signals.jsonl", help="detected signals log file")
     return p.parse_args()
 
 
@@ -35,6 +36,7 @@ async def main(args: argparse.Namespace) -> int:
         log_level=args.log_level,
         log_file="" if args.no_log_file else "cvd_strategy.log",
         state_file=args.state_file,
+        signals_file=args.signals_file,
     )
     setup_logging(cfg)
     log = logging.getLogger("main")
