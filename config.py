@@ -42,7 +42,7 @@ class Config:
     breakout_slope_z: float = 2.0
     breakout_delta_ratio: float = 3.0
     breakout_min_conditions: int = 3
-    breakout_cooldown: int = 300
+    breakout_cooldown: int = 30
 
     session_start: time = time(9, 30)
     session_end: time = time(16, 0)
