@@ -174,34 +174,36 @@ async def _feed_bear_signal(ib, strat):
 
 
 async def test_regime_gate():
-    cfg = Config(
-        divergence_lookback=3, min_ticks_per_bar=1,
-        option_symbol="SPY", option_sec_type="STK",
-        spread_width=5.0, strike_band=12.0,
-        min_entry_credit=0.10, max_entry_credit=3.00,
-        cooldown_seconds=0, regime_filter=True,
-        log_level="INFO", log_file="", signals_file="",
-    )
+    with TemporaryDirectory() as tmp:
+        cfg = Config(
+            divergence_lookback=3, min_ticks_per_bar=1,
+            option_symbol="SPY", option_sec_type="STK",
+            spread_width=5.0, strike_band=12.0,
+            min_entry_credit=0.10, max_entry_credit=3.00,
+            cooldown_seconds=0, regime_filter=True,
+            log_level="INFO", log_file="", signals_file="",
+            state_file=str(Path(tmp) / "state.jsonl"),
+        )
 
-    # uptrend: bear signal must be skipped
-    ib = MockIB(spot=592.0)
-    strat = Strategy(ib, cfg)
-    strat.entry_allowed = lambda: True
-    await strat.setup()
-    strat.trend.regime = lambda: "up"
-    await _feed_bear_signal(ib, strat)
-    assert len(strat.executor.positions) == 0, "trend up should be no-trade (skipped)"
-    print("OK regime gate: trend up -> no trade")
+        # uptrend: bear signal must be skipped
+        ib = MockIB(spot=592.0)
+        strat = Strategy(ib, cfg)
+        strat.entry_allowed = lambda: True
+        await strat.setup()
+        strat.trend.regime = lambda: "up"
+        await _feed_bear_signal(ib, strat)
+        assert len(strat.executor.positions) == 0, "trend up should be no-trade (skipped)"
+        print("OK regime gate: trend up -> no trade")
 
-    # downtrend: also no-trade (空仓)
-    ib2 = MockIB(spot=592.0)
-    strat2 = Strategy(ib2, cfg)
-    strat2.entry_allowed = lambda: True
-    await strat2.setup()
-    strat2.trend.regime = lambda: "down"
-    await _feed_bear_signal(ib2, strat2)
-    assert len(strat2.executor.positions) == 0, "trend down should be no-trade (skipped)"
-    print("OK regime gate: trend down -> no trade")
+        # downtrend: also no-trade (空仓)
+        ib2 = MockIB(spot=592.0)
+        strat2 = Strategy(ib2, cfg)
+        strat2.entry_allowed = lambda: True
+        await strat2.setup()
+        strat2.trend.regime = lambda: "down"
+        await _feed_bear_signal(ib2, strat2)
+        assert len(strat2.executor.positions) == 0, "trend down should be no-trade (skipped)"
+        print("OK regime gate: trend down -> no trade")
 
 
 async def main():
