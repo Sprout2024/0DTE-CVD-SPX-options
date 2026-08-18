@@ -49,6 +49,7 @@ class Strategy:
         self._last_signal: Optional[Signal] = None
         self._entry_task: Optional[asyncio.Task] = None
         self.cooldown_until = 0.0
+        self._last_breakout_ts = 0.0
         self.running = True
         self._tickers_subscribed = False
         self._log = logging.getLogger("strategy")
@@ -156,6 +157,36 @@ class Strategy:
         if signal is not None:
             self._record_signal(signal)
             self._on_signal(signal)
+        regime = self.trend.regime()
+        if regime in ("up", "down"):
+            bo = self.engine.detect_breakout()
+            if bo is not None and time.time() - self._last_breakout_ts >= self.cfg.breakout_cooldown:
+                self._record_breakout(bo, bar)
+                self._last_breakout_ts = time.time()
+
+    def _record_breakout(self, bo: dict, bar: Bar) -> None:
+        """Append a CVD strong-momentum breakout signal (trend regime) to the signals file."""
+        import json
+
+        c1, c2, c3, c4 = bo["conditions"]
+        rec = {
+            "ts": bar.ts.isoformat(),
+            "type": "breakout",
+            "direction": bo["direction"],
+            "regime": self.trend.regime(),
+            "conditions": bo["count"],
+            "c1_abs_highlow": bool(c1),
+            "c2_slope": bool(c2),
+            "c3_comove": bool(c3),
+            "c4_delta_spike": bool(c4),
+        }
+        path = self.cfg.signals_file
+        if path:
+            parent = os.path.dirname(path)
+            if parent:
+                os.makedirs(parent, exist_ok=True)
+            with open(path, "a") as f:
+                f.write(json.dumps(rec, default=str) + "\n")
 
     def _record_signal(self, signal: Signal) -> None:
         """Append every detected signal to the signals file for later analysis."""

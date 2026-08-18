@@ -38,6 +38,12 @@ class Config:
     iron_condor_take_profit_pct: float = 0.70
     iron_condor_stop_loss_pct: float = 0.50
 
+    breakout_lookback: int = 60
+    breakout_slope_z: float = 2.0
+    breakout_delta_ratio: float = 3.0
+    breakout_min_conditions: int = 3
+    breakout_cooldown: int = 300
+
     session_start: time = time(9, 30)
     session_end: time = time(16, 0)
     no_trade_first_minutes: int = 15

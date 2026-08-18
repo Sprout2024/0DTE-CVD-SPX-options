@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import date, datetime
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 from config import Config
 
@@ -128,6 +128,67 @@ class CvdEngine:
             if latest.cvd_close > prev_cvd_min + self.cfg.min_cvd_gap:
                 return Signal("bull", latest, latest.low, latest.cvd_close)
 
+        return None
+
+    def detect_breakout(self) -> Optional[Dict]:
+        """CVD strong momentum breakout (4-condition "true momentum" check).
+
+        Returns a dict when >= ``breakout_min_conditions`` of the four conditions
+        hold: (1) absolute high/low breakout over the lookback, (2) steep CVD
+        slope (z-score), (3) price & CVD co-movement, (4) volume-delta spike.
+        """
+        c = self.cfg
+        if len(self.bars) < c.breakout_lookback + 1:
+            return None
+        latest = self.bars[-1]
+        if latest.ticks < c.min_ticks_per_bar:
+            return None
+        prev = self.bars[-(c.breakout_lookback + 1):-1]
+        prev_cvd_max = max(b.cvd_close for b in prev)
+        prev_cvd_min = min(b.cvd_close for b in prev)
+
+        c1_bull = latest.cvd_close > prev_cvd_max
+        c1_bear = latest.cvd_close < prev_cvd_min
+
+        if len(self.bars) >= 20:
+            deltas = [b.cvd_delta for b in self.bars[-20:]]
+            m = sum(deltas) / len(deltas)
+            var = sum((d - m) ** 2 for d in deltas) / len(deltas)
+            sd = var ** 0.5
+            mom = sum(b.cvd_delta for b in self.bars[-3:])
+            z = mom / sd if sd > 0 else 0.0
+        else:
+            z = 0.0
+        c2_bull = z >= c.breakout_slope_z
+        c2_bear = z <= -c.breakout_slope_z
+
+        prev_c = self.bars[-2].close if len(self.bars) >= 2 else latest.close
+        price_chg = latest.close - prev_c
+        c3_bull = price_chg > 0 and latest.cvd_delta > 0
+        c3_bear = price_chg < 0 and latest.cvd_delta < 0
+
+        if len(self.bars) >= 11:
+            win = [abs(b.cvd_delta) for b in self.bars[-11:-1]]
+            avg = sum(win) / len(win)
+        else:
+            avg = 0.0
+        c4_bull = avg > 0 and latest.cvd_delta >= c.breakout_delta_ratio * avg
+        c4_bear = avg > 0 and latest.cvd_delta <= -c.breakout_delta_ratio * avg
+
+        n_bull = int(c1_bull) + int(c2_bull) + int(c3_bull) + int(c4_bull)
+        n_bear = int(c1_bear) + int(c2_bear) + int(c3_bear) + int(c4_bear)
+        if n_bull >= c.breakout_min_conditions:
+            return {
+                "direction": "up",
+                "count": n_bull,
+                "conditions": (c1_bull, c2_bull, c3_bull, c4_bull),
+            }
+        if n_bear >= c.breakout_min_conditions:
+            return {
+                "direction": "down",
+                "count": n_bear,
+                "conditions": (c1_bear, c2_bear, c3_bear, c4_bear),
+            }
         return None
 
     def last_bar(self) -> Optional[Bar]:

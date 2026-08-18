@@ -64,10 +64,51 @@ def test_reset():
     print("OK reset")
 
 
+def _engine_with_bars(cfg, n_flat=65, spike_delta=500):
+    """Build an engine: `n_flat` flat bars then a single strong momentum bar."""
+    from cvd_engine import CvdEngine
+
+    eng = CvdEngine(cfg)
+    ts = datetime(2026, 8, 17, 9, 30, 0)
+    cvd = 0.0
+    for i in range(n_flat):
+        dp = 1.0 if i % 2 == 0 else -1.0
+        cvd += dp
+        t = ts + timedelta(minutes=i)
+        eng.ingest_bar(Bar(ts=t, open=100, high=101, low=99, close=100, volume=100, ticks=5,
+                           cvd_open=cvd - dp, cvd_high=max(cvd, cvd - dp), cvd_low=min(cvd, cvd - dp),
+                           cvd_close=cvd, cvd_delta=dp))
+    # spike bar
+    cvd += spike_delta
+    t = ts + timedelta(minutes=n_flat)
+    eng.ingest_bar(Bar(ts=t, open=100, high=102, low=100, close=102, volume=2000, ticks=20,
+                       cvd_open=cvd - spike_delta, cvd_high=cvd, cvd_low=cvd - spike_delta,
+                       cvd_close=cvd, cvd_delta=spike_delta))
+    return eng
+
+
+def test_breakout_up():
+    cfg = _cfg(breakout_lookback=60, breakout_slope_z=2.0, breakout_delta_ratio=3.0, breakout_min_conditions=3)
+    eng = _engine_with_bars(cfg)
+    bo = eng.detect_breakout()
+    assert bo is not None and bo["direction"] == "up", bo
+    assert bo["count"] == 4, bo
+    print("OK breakout up (all 4 conditions)")
+
+
+def test_breakout_insufficient():
+    cfg = _cfg(breakout_lookback=60, breakout_slope_z=2.0, breakout_delta_ratio=3.0, breakout_min_conditions=3)
+    eng = _engine_with_bars(cfg, n_flat=30)  # < 60 lookback bars
+    assert eng.detect_breakout() is None
+    print("OK breakout insufficient data")
+
+
 if __name__ == "__main__":
     test_uptrend()
     test_downtrend()
     test_range()
     test_insufficient_data()
     test_reset()
+    test_breakout_up()
+    test_breakout_insufficient()
     print("ALL TREND TESTS PASSED")
