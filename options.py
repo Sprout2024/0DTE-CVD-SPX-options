@@ -22,6 +22,17 @@ class Spread:
     quantity: int = 1
 
 
+@dataclass
+class IronCondor:
+    short_call: Option
+    long_call: Option
+    short_put: Option
+    long_put: Option
+    combo: Contract
+    expiry: str
+    quantity: int = 1
+
+
 class OptionSelector:
     """Selects 0DTE credit-spread legs on the option underlying and prices them from live quotes.
 
@@ -225,6 +236,64 @@ class OptionSelector:
         s_mid = (sb + sa) / 2.0
         l_mid = (lb + la) / 2.0
         return round(s_mid - l_mid, 2)
+
+    async def build_iron_condor(self, spot: float) -> Optional[IronCondor]:
+        expiry = self._pick_expiry()
+        if expiry is None:
+            return None
+        self.expiry = expiry
+        off = self.cfg.iron_condor_offset
+        wing = self.cfg.iron_condor_wing
+        sc_k = self._nearest_strike(spot + off)
+        lc_k = self._nearest_strike(spot + off + wing)
+        sp_k = self._nearest_strike(spot - off)
+        lp_k = self._nearest_strike(spot - off - wing)
+        if not all((sc_k, lc_k, sp_k, lp_k)) or sc_k == lc_k or sp_k == lp_k:
+            return None
+        ex = self.cfg.exchange
+        sc = Option(self.cfg.option_symbol, expiry, sc_k, "C", ex)
+        lc = Option(self.cfg.option_symbol, expiry, lc_k, "C", ex)
+        sp = Option(self.cfg.option_symbol, expiry, sp_k, "P", ex)
+        lp = Option(self.cfg.option_symbol, expiry, lp_k, "P", ex)
+        await self.ib.qualifyContractsAsync(sc, lc, sp, lp)
+        if not all((sc.conId, lc.conId, sp.conId, lp.conId)):
+            return None
+        await self._subscribe_legs4(sc, lc, sp, lp)
+        combo = Contract()
+        combo.symbol = self.cfg.option_symbol
+        combo.secType = "BAG"
+        combo.currency = self.cfg.currency
+        combo.exchange = ex
+        combo.comboLegs = [
+            ComboLeg(conId=sc.conId, ratio=1, action="SELL", exchange=ex),
+            ComboLeg(conId=lc.conId, ratio=1, action="BUY", exchange=ex),
+            ComboLeg(conId=sp.conId, ratio=1, action="SELL", exchange=ex),
+            ComboLeg(conId=lp.conId, ratio=1, action="BUY", exchange=ex),
+        ]
+        return IronCondor(sc, lc, sp, lp, combo, expiry)
+
+    async def _subscribe_legs4(self, sc: Option, lc: Option, sp: Option, lp: Option) -> None:
+        for o in (sc, lc, sp, lp):
+            if o.conId not in self._live_tickers:
+                self._live_tickers[o.conId] = self.ib.reqMktData(o, "", False, False)
+        deadline = time.time() + self.cfg.quote_wait_seconds
+        while time.time() < deadline:
+            if all(self._has_bid_ask(self._live_tickers.get(o.conId)) for o in (sc, lc, sp, lp)):
+                return
+            await asyncio.sleep(0.1)
+
+    def iron_condor_mid(self, condor: IronCondor) -> Optional[float]:
+        qs = [self._live_tickers.get(o.conId) for o in (condor.short_call, condor.long_call, condor.short_put, condor.long_put)]
+        if any(t is None or not self._has_bid_ask(t) for t in qs):
+            return None
+        sc_mid = (qs[0].bid + qs[0].ask) / 2.0
+        lc_mid = (qs[1].bid + qs[1].ask) / 2.0
+        sp_mid = (qs[2].bid + qs[2].ask) / 2.0
+        lp_mid = (qs[3].bid + qs[3].ask) / 2.0
+        return round((sc_mid - lc_mid) + (sp_mid - lp_mid), 2)
+
+    def iron_condor_legs(self, condor: IronCondor) -> List[Option]:
+        return [condor.short_call, condor.long_call, condor.short_put, condor.long_put]
 
     async def cleanup(self) -> None:
         for t in self._live_tickers.values():

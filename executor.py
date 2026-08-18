@@ -11,7 +11,7 @@ from ib_insync import IB, ComboLeg, Contract, LimitOrder, MarketOrder, Option, T
 
 from config import Config
 from cvd_engine import Bar, Signal
-from options import OptionSelector, Spread
+from options import IronCondor, OptionSelector, Spread
 from state_store import CvdStore
 
 
@@ -28,6 +28,7 @@ class Position:
     tp_target: float
     sl_price: float
     status: str = "OPEN"
+    condor: Optional[IronCondor] = None
     close_kind: str = ""
     close_trade: Optional[Trade] = None
     close_time: float = 0.0
@@ -101,7 +102,53 @@ class Executor:
         )
         return pos
 
+    async def open_iron_condor(self, condor: IronCondor, credit: float, signal: Signal) -> Optional[Position]:
+        if credit is None or credit <= 0:
+            self._log.warning("no iron-condor mid available, skip entry")
+            return None
+        price = self._snap_tick(credit)
+        order = LimitOrder("SELL", condor.quantity, price)
+        order.tif = "DAY"
+        order.transmit = True
+        order.advancedErrorOverride = "COMBOPAYOUT"
+        trade = self.ib.placeOrder(condor.combo, order)
+        self._log.info("iron-condor entry SELL %s @ mid %.2f", condor.quantity, price)
+        ok = await self._wait(trade, self.cfg.entry_valid_seconds)
+        if not ok:
+            if not trade.isDone():
+                self.ib.cancelOrder(order)
+            self._log.warning("iron-condor entry not filled, cancelled")
+            return None
+        if not trade.fills:
+            self._log.warning("iron-condor entry marked done without fills")
+            return None
+        avg = sum(f.execution.price for f in trade.fills) / len(trade.fills)
+        self._seq += 1
+        pos = Position(
+            id=f"P{self._seq}",
+            direction="range",
+            spread=None,
+            quantity=condor.quantity,
+            entry_time=time.time(),
+            entry_credit=avg,
+            signal_extreme=signal.extreme,
+            signal_cvd=signal.cvd_extreme,
+            tp_target=round(avg * (1.0 - self.cfg.iron_condor_take_profit_pct), 2),
+            sl_price=round(avg * (1.0 + self.cfg.iron_condor_stop_loss_pct), 2),
+            condor=condor,
+        )
+        self.positions[pos.id] = pos
+        if self.store is not None:
+            self.store.save_position(pos)
+        self._log.info(
+            "position %s IRON-CONDOR OPEN credit=%.2f tp=%.2f sl=%.2f",
+            pos.id, avg, pos.tp_target, pos.sl_price,
+        )
+        return pos
+
     async def restore_position(self, data: dict) -> Optional[Position]:
+        if data.get("condor"):
+            return await self._restore_condor(data)
         d = data["direction"]
         sym = self.cfg.option_symbol
         short_opt = Option(sym, data["expiry"], data["sell_strike"], data.get("right") or ("P" if d == "bull" else "C"), self.cfg.option_exchange)
@@ -140,14 +187,89 @@ class Executor:
         )
         return pos
 
+    async def _restore_condor(self, data: dict) -> Optional[Position]:
+        c = data["condor"]
+        sym = self.cfg.option_symbol
+        ex = self.cfg.option_exchange
+        sc = Option(sym, c["expiry"], c["short_call"], "C", ex)
+        lc = Option(sym, c["expiry"], c["long_call"], "C", ex)
+        sp = Option(sym, c["expiry"], c["short_put"], "P", ex)
+        lp = Option(sym, c["expiry"], c["long_put"], "P", ex)
+        await self.ib.qualifyContractsAsync(sc, lc, sp, lp)
+        if not all((sc.conId, lc.conId, sp.conId, lp.conId)):
+            self._log.error("restore condor: leg qualification failed")
+            return None
+        await self.selector._subscribe_legs4(sc, lc, sp, lp)
+        combo = Contract()
+        combo.symbol = sym
+        combo.secType = "BAG"
+        combo.currency = self.cfg.currency
+        combo.exchange = ex
+        combo.comboLegs = [
+            ComboLeg(sc.conId, 1, "SELL", ex),
+            ComboLeg(lc.conId, 1, "BUY", ex),
+            ComboLeg(sp.conId, 1, "SELL", ex),
+            ComboLeg(lp.conId, 1, "BUY", ex),
+        ]
+        condor = IronCondor(sc, lc, sp, lp, combo, c["expiry"], data["quantity"])
+        pos = Position(
+            id=data.get("id", f"P{self._seq + 1}"),
+            direction="range",
+            spread=None,
+            quantity=data["quantity"],
+            entry_time=data["entry_time"],
+            entry_credit=data["entry_credit"],
+            signal_extreme=data["signal_extreme"],
+            signal_cvd=data["signal_cvd"],
+            tp_target=data["tp_target"],
+            sl_price=data["sl_price"],
+            condor=condor,
+        )
+        self._seq = max(self._seq, int(pos.id.lstrip("P")) if pos.id.startswith("P") else 0)
+        self.positions[pos.id] = pos
+        self._log.warning("restored iron-condor %s credit=%.2f", pos.id, pos.entry_credit)
+        return pos
+
+    def _combo(self, pos: Position) -> Contract:
+        return pos.condor.combo if pos.condor is not None else pos.spread.combo
+
+    def _pos_value(self, pos: Position) -> Optional[float]:
+        if pos.condor is not None:
+            return self.selector.iron_condor_mid(pos.condor)
+        return self.selector.spread_mid(pos.spread)
+
     async def manage(self, spot: float, last_bar: Optional[Bar]) -> None:
         for pos in list(self.positions.values()):
             if pos.status != "OPEN":
+                continue
+            if pos.condor is not None:
+                await self._manage_condor(pos)
                 continue
             mid = self.selector.spread_mid(pos.spread)
             if mid is None:
                 continue
             await self._manage_one(pos, mid, spot, last_bar)
+
+    async def _manage_condor(self, pos: Position) -> None:
+        if pos.close_trade is not None:
+            if pos.close_trade.isDone():
+                if pos.close_trade.orderStatus.status == "Filled":
+                    self._finalize_close(pos, pos.close_trade)
+                else:
+                    pos.close_trade = None
+            elif time.time() - pos.close_time > self.cfg.close_patience_seconds:
+                self.ib.cancelOrder(pos.close_trade.order)
+                await self._market_close(pos)
+            return
+        value = self.selector.iron_condor_mid(pos.condor)
+        if value is None:
+            return
+        if value >= pos.sl_price:
+            await self._close(pos, "SL")
+            return
+        if value <= pos.tp_target:
+            await self._close(pos, "TP")
+            return
 
     async def _manage_one(self, pos: Position, mid: float, spot: float, last_bar: Optional[Bar]) -> None:
         if pos.close_trade is not None:
@@ -192,28 +314,28 @@ class Executor:
         if kind in ("SL", "TECH"):
             await self._market_close(pos)
             return
-        mid = self.selector.spread_mid(pos.spread)
-        if mid is None:
+        value = self._pos_value(pos)
+        if value is None:
             await self._market_close(pos)
             return
-        price = self._snap_tick(mid)
+        price = self._snap_tick(value)
         order = LimitOrder("BUY", pos.quantity, price)
         order.tif = "DAY"
         order.transmit = True
         order.advancedErrorOverride = "COMBOPAYOUT"
-        trade = self.ib.placeOrder(pos.spread.combo, order)
+        trade = self.ib.placeOrder(self._combo(pos), order)
         pos.close_trade = trade
         pos.close_time = time.time()
         self._log.info("position %s close %s order BUY @ mid %.2f", pos.id, kind, price)
 
     async def _market_close(self, pos: Position) -> None:
-        mid = self.selector.spread_mid(pos.spread)
-        if mid is not None:
-            price = self._snap_tick(mid)
+        value = self._pos_value(pos)
+        if value is not None:
+            price = self._snap_tick(value)
             order = LimitOrder("BUY", pos.quantity, price)
             order.tif = "DAY"
             order.advancedErrorOverride = "COMBOPAYOUT"
-            trade = self.ib.placeOrder(pos.spread.combo, order)
+            trade = self.ib.placeOrder(self._combo(pos), order)
             self._log.info("position %s close %s @ mid %.2f", pos.id, pos.close_kind or "MANUAL", price)
             ok = await self._wait(trade, 8)
             if ok:
@@ -225,7 +347,7 @@ class Executor:
         order = MarketOrder("BUY", pos.quantity)
         order.tif = "DAY"
         order.advancedErrorOverride = "COMBOPAYOUT"
-        trade = self.ib.placeOrder(pos.spread.combo, order)
+        trade = self.ib.placeOrder(self._combo(pos), order)
         self._log.info("position %s market close %s", pos.id, pos.close_kind or "MANUAL")
         ok = await self._wait(trade, 15)
         if ok:
@@ -246,8 +368,12 @@ class Executor:
             "position %s CLOSED %s credit=%.2f close=%.2f pnl=%.2f held=%.0fs",
             pos.id, pos.close_kind, pos.entry_credit, avg, pos.realized_pnl, held,
         )
-        for t in (pos.spread.short_leg, pos.spread.long_leg):
-            self.ib.cancelMktData(t)
+        if pos.condor is not None:
+            for t in self.selector.iron_condor_legs(pos.condor):
+                self.ib.cancelMktData(t)
+        else:
+            for t in (pos.spread.short_leg, pos.spread.long_leg):
+                self.ib.cancelMktData(t)
         if self.store is not None:
             self.store.clear_position()
 

@@ -81,6 +81,7 @@ def test_store_position_roundtrip():
             id = "P1"
             direction = "bull"
             spread = _Spread()
+            condor = None
             quantity = 1
             entry_time = datetime(2026, 8, 17, 12, 0).timestamp()
             entry_credit = 5.0

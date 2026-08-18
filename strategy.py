@@ -16,6 +16,7 @@ from cvd_engine import Bar, CvdEngine, Signal
 from executor import Executor
 from options import OptionSelector
 from state_store import CvdStore
+from trend import TrendDetector
 
 EASTERN = None
 
@@ -32,6 +33,7 @@ class Strategy:
         self.ib = ib
         self.cfg = cfg
         self.engine = CvdEngine(cfg)
+        self.trend = TrendDetector(cfg)
         self.selector = OptionSelector(ib, cfg)
         self.store = CvdStore(cfg.state_file)
         self.executor = Executor(ib, cfg, self.selector, store=self.store)
@@ -147,6 +149,7 @@ class Strategy:
                     self._on_new_bar(bar)
 
     def _on_new_bar(self, bar: Bar) -> None:
+        self.trend.update(bar)
         signal = self.engine.detect_signal()
         if signal is not None:
             self._on_signal(signal)
@@ -175,6 +178,26 @@ class Strategy:
         try:
             spot = self._option_spot()
             if spot is None:
+                return
+            regime = self.trend.regime()
+            if self.cfg.regime_filter:
+                if regime == "range":
+                    condor = await self.selector.build_iron_condor(spot)
+                    if condor is None:
+                        self._log.warning("no iron condor built for signal")
+                        return
+                    credit = self.selector.iron_condor_mid(condor)
+                    if credit is None:
+                        self._log.warning("no iron-condor quote available")
+                        return
+                    if credit < self.cfg.min_entry_credit or credit > self.cfg.max_entry_credit:
+                        self._log.warning("condor credit %.2f outside [%.2f, %.2f]", credit, self.cfg.min_entry_credit, self.cfg.max_entry_credit)
+                        return
+                    pos = await self.executor.open_iron_condor(condor, credit, signal)
+                    if pos is None:
+                        self.cooldown_until = time.time() + self.cfg.cooldown_seconds
+                    return
+                self._log.info("signal %s skipped (trend %s, no trade)", signal.direction, regime)
                 return
             spread = await self.selector.select_spread(signal.direction, spot)
             if spread is None:
@@ -230,8 +253,10 @@ class Strategy:
         bars, pos_data = self.store.load(day)
         if bars:
             self.engine = CvdEngine(self.cfg)
+            self.trend.reset()
             for b in bars:
                 self.engine.ingest_bar(b)
+                self.trend.update(b)
             self._log.info(
                 "restored %d bars, running cvd=%.2f", len(bars), self.engine.running_delta()
             )

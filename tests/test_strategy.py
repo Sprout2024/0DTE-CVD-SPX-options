@@ -85,6 +85,7 @@ async def test_full_strategy():
             take_profit_pct=0.30,
             stop_loss_pct=1.00,
             mid_offset=0.02,
+            regime_filter=False,
             log_level="INFO",
             log_file="",
             state_file=str(Path(tmp) / "state.jsonl"),
@@ -149,9 +150,63 @@ async def test_full_strategy():
         print("close OK: kind=%s pnl=%.2f" % (pos2.close_kind, pos2.realized_pnl))
 
 
+async def _feed_bear_signal(ib, strat):
+    """Feed a 4-minute uptrend followed by a bear divergence (new high + cvd down)."""
+    spy_ticker = strat.spot_ticker
+    today = datetime.now(ZoneInfo("America/New_York")).date()
+    base = datetime(today.year, today.month, today.day, 9, 30, 0)
+    feeds = {
+        "A": [(590.0, 100, 1), (591.0, 100, 1), (592.0, 100, 1)],
+        "B": [(592.2, 50, 1), (592.5, 50, 1)],
+        "C": [(592.5, 50, 1), (592.6, 50, 1)],
+        "D": [(593.0, 50, -1), (593.5, 50, -1), (594.0, 50, -1)],
+    }
+    bar_start = {k: base.replace(minute=30 + i) for i, k in enumerate(["A", "B", "C", "D"])}
+    for key, trades in feeds.items():
+        ts = bar_start[key]
+        for seq, (price, size, side) in enumerate(trades):
+            t = ts.replace(second=seq)
+            emit_trade(ib, spy_ticker, price, size, side, t)
+            await asyncio.sleep(0.02)
+    emit_trade(ib, spy_ticker, 593.5, 50, -1, base.replace(minute=34, second=1))
+    await asyncio.sleep(0.5)
+
+
+async def test_regime_gate():
+    cfg = Config(
+        divergence_lookback=3, min_ticks_per_bar=1,
+        option_symbol="SPY", option_sec_type="STK",
+        spread_width=5.0, strike_band=12.0,
+        min_entry_credit=0.10, max_entry_credit=3.00,
+        cooldown_seconds=0, regime_filter=True,
+        log_level="INFO", log_file="",
+    )
+
+    # uptrend: bear signal must be skipped
+    ib = MockIB(spot=592.0)
+    strat = Strategy(ib, cfg)
+    strat.entry_allowed = lambda: True
+    await strat.setup()
+    strat.trend.regime = lambda: "up"
+    await _feed_bear_signal(ib, strat)
+    assert len(strat.executor.positions) == 0, "trend up should be no-trade (skipped)"
+    print("OK regime gate: trend up -> no trade")
+
+    # downtrend: also no-trade (空仓)
+    ib2 = MockIB(spot=592.0)
+    strat2 = Strategy(ib2, cfg)
+    strat2.entry_allowed = lambda: True
+    await strat2.setup()
+    strat2.trend.regime = lambda: "down"
+    await _feed_bear_signal(ib2, strat2)
+    assert len(strat2.executor.positions) == 0, "trend down should be no-trade (skipped)"
+    print("OK regime gate: trend down -> no trade")
+
+
 async def main():
     await test_full_strategy()
     await test_no_trade_windows()
+    await test_regime_gate()
     print("FULL STRATEGY MOCK TEST PASSED")
 
 

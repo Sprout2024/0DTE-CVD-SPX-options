@@ -83,27 +83,31 @@ class CvdStore:
 
     def save_position(self, pos) -> None:
         day = datetime.fromtimestamp(pos.entry_time, _ET).date().isoformat()
-        self._append(
-            {
-                "k": "pos",
-                "d": day,
-                "pos": {
-                    "id": pos.id,
-                    "direction": pos.direction,
-                    "right": "P" if pos.direction == "bull" else "C",
-                    "sell_strike": pos.spread.short_leg.strike,
-                    "buy_strike": pos.spread.long_leg.strike,
-                    "expiry": pos.spread.expiry,
-                    "quantity": pos.quantity,
-                    "entry_time": pos.entry_time,
-                    "entry_credit": pos.entry_credit,
-                    "signal_extreme": pos.signal_extreme,
-                    "signal_cvd": pos.signal_cvd,
-                    "tp_target": pos.tp_target,
-                    "sl_price": pos.sl_price,
-                },
+        base = {
+            "id": pos.id,
+            "direction": pos.direction,
+            "quantity": pos.quantity,
+            "entry_time": pos.entry_time,
+            "entry_credit": pos.entry_credit,
+            "signal_extreme": pos.signal_extreme,
+            "signal_cvd": pos.signal_cvd,
+            "tp_target": pos.tp_target,
+            "sl_price": pos.sl_price,
+        }
+        if pos.condor is not None:
+            base["condor"] = {
+                "expiry": pos.condor.expiry,
+                "short_call": pos.condor.short_call.strike,
+                "long_call": pos.condor.long_call.strike,
+                "short_put": pos.condor.short_put.strike,
+                "long_put": pos.condor.long_put.strike,
             }
-        )
+        else:
+            base["right"] = "P" if pos.direction == "bull" else "C"
+            base["sell_strike"] = pos.spread.short_leg.strike
+            base["buy_strike"] = pos.spread.long_leg.strike
+            base["expiry"] = pos.spread.expiry
+        self._append({"k": "pos", "d": day, "pos": base})
 
     def clear_position(self) -> None:
         self._append({"k": "pos_done", "d": _et_now_day().isoformat()})

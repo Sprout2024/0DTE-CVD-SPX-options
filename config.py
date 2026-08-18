@@ -30,6 +30,14 @@ class Config:
     min_price_move: float = 0.05
     min_cvd_gap: float = 1.0
 
+    regime_filter: bool = True
+    trend_lookback_hours: int = 4
+    trend_slope_threshold: float = 5.0
+    iron_condor_offset: float = 30.0
+    iron_condor_wing: float = 25.0
+    iron_condor_take_profit_pct: float = 0.70
+    iron_condor_stop_loss_pct: float = 0.50
+
     session_start: time = time(9, 30)
     session_end: time = time(16, 0)
     no_trade_first_minutes: int = 15
