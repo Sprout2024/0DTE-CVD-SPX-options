@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 from datetime import date, datetime, timedelta
 from typing import Dict, List, Optional, Tuple
 from zoneinfo import ZoneInfo
@@ -30,11 +31,16 @@ class CvdStore:
     position without re-deriving it from IBKR.
     """
 
-    def __init__(self, path: str):
+    def __init__(self, path: str, trades_path: str = "", account: str = ""):
         self.path = path
+        self.trades_path = trades_path or os.path.join(os.path.dirname(path), "trades.jsonl")
+        self.account = account
         parent = os.path.dirname(path)
         if parent:
             os.makedirs(parent, exist_ok=True)
+        trades_parent = os.path.dirname(self.trades_path)
+        if trades_parent:
+            os.makedirs(trades_parent, exist_ok=True)
         self._prune()
 
     def _prune(self) -> None:
@@ -71,6 +77,11 @@ class CvdStore:
         with open(self.path, "a") as f:
             f.write(line + "\n")
 
+    def _append_trades(self, rec: dict) -> None:
+        line = json.dumps(rec, separators=(",", ":"), default=str)
+        with open(self.trades_path, "a") as f:
+            f.write(line + "\n")
+
     def append_bar(self, bar: Bar) -> None:
         self._append(
             {
@@ -82,8 +93,46 @@ class CvdStore:
                 "co": bar.cvd_open, "ch": bar.cvd_high, "cl": bar.cvd_low,
                 "cc": bar.cvd_close, "cd": bar.cvd_delta,
                 "iv": bar.iv,
+                "r": bar.regime,
             }
         )
+
+    def append_trade(self, rec: dict) -> None:
+        """Append a free-form trade record (open/close/other) to the trade log."""
+        self._append_trades(rec)
+
+    def save_trade_open(self, pos) -> None:
+        rec = {
+            "event": "open",
+            "id": pos.id,
+            "time": datetime.now(_ET).isoformat(),
+            "type": "iron_condor" if pos.condor is not None else "spread",
+            "direction": pos.direction,
+            "quantity": pos.quantity,
+            "entry_credit": pos.entry_credit,
+            "tp_target": pos.tp_target,
+            "sl_price": pos.sl_price,
+            "expiry": pos.condor.expiry if pos.condor is not None else pos.spread.expiry,
+            "signal_extreme": pos.signal_extreme,
+            "signal_cvd": pos.signal_cvd,
+            "regime": getattr(pos, "regime", ""),
+            "account": self.account,
+        }
+        self._append_trades(rec)
+
+    def save_trade_close(self, pos) -> None:
+        rec = {
+            "event": "close",
+            "id": pos.id,
+            "time": datetime.now(_ET).isoformat(),
+            "kind": pos.close_kind,
+            "entry_credit": pos.entry_credit,
+            "close_price": pos.close_price,
+            "realized_pnl": pos.realized_pnl,
+            "held_seconds": round(time.time() - pos.entry_time, 1),
+            "account": self.account,
+        }
+        self._append_trades(rec)
 
     def save_position(self, pos) -> None:
         day = datetime.fromtimestamp(pos.entry_time, _ET).date().isoformat()
@@ -198,4 +247,5 @@ class CvdStore:
             cvd_open=rec["co"], cvd_high=rec["ch"], cvd_low=rec["cl"],
             cvd_close=rec["cc"], cvd_delta=rec["cd"],
             iv=rec.get("iv", 0.0),
+            regime=rec.get("r", "none"),
         )

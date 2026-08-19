@@ -41,12 +41,21 @@ class MockTrade:
         return self._done
 
 
+@dataclass
+class MockPosition:
+    contract: Contract
+    account: str
+    position: float
+
+
 class MockIB:
     def __init__(self, spot=592.0):
         self.spot = spot
         self.pendingTickersEvent = MockEvent()
         self.tickers: Dict[int, MockTicker] = {}
         self.trades = []
+        self.positions_list = []
+        self.no_option_quotes = False
         self._next_conid = 1000
         self.chain = OptionChain(
             exchange="SMART", underlyingConId=1, tradingClass="SPY",
@@ -66,10 +75,10 @@ class MockIB:
         return True
 
     async def reqPositionsAsync(self):
-        return []
+        return self.positions_list
 
     def positions(self):
-        return []
+        return self.positions_list
 
     async def qualifyContractsAsync(self, *contracts):
         for c in contracts:
@@ -97,6 +106,8 @@ class MockIB:
         return t
 
     def _seed_option(self, t, contract, generic):
+        if self.no_option_quotes:
+            return
         r = random.Random(hash((contract.strike, contract.right)))
         otm = contract.strike - self.spot
         if contract.right == "C":
@@ -137,6 +148,9 @@ class MockIB:
         trade._done = True
 
     def _spread_mid(self, contract):
+        if not (contract.comboLegs or []):
+            # single-leg contract (e.g. kill-switch market order on an Option)
+            return getattr(self.tickers.get(id(contract)), "ask", 1.0) or 1.0
         total = 0.0
         for leg in contract.comboLegs:
             strike = self._strike_by_conid(leg.conId)

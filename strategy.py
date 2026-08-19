@@ -60,7 +60,8 @@ class Strategy:
         self.engine = CvdEngine(cfg)
         self.trend = TrendDetector(cfg)
         self.selector = OptionSelector(ib, cfg)
-        self.store = CvdStore(cfg.state_file)
+        self.store = CvdStore(cfg.state_file, trades_path=cfg.trades_file,
+                          account=getattr(cfg, "account", ""))
         self.executor = Executor(ib, cfg, self.selector, store=self.store)
         self.signal: Optional[Contract] = None
         self.option_underlying: Optional[Contract] = None
@@ -76,6 +77,7 @@ class Strategy:
         self._session_day = None
         self._last_entry_ts = 0.0
         self.running = True
+        self._day_stopped = False
         self._tickers_subscribed = False
         self._log = logging.getLogger("strategy")
 
@@ -183,11 +185,12 @@ class Strategy:
                 bar = self.engine.add_trade(price, size, delta, tick.time)
                 if bar is not None:
                     bar.iv = round(self.engine.realized_iv(), 4)
+                    self._on_new_bar(bar)  # updates trend + sets bar.regime
                     self.store.append_bar(bar)
-                    self._on_new_bar(bar)
 
     def _on_new_bar(self, bar: Bar) -> None:
         self.trend.update(bar)
+        bar.regime = self.trend.regime()
         # Record CVD divergence signals for analysis (does not drive entry).
         signal = self.engine.detect_signal()
         if signal is not None:
@@ -201,6 +204,8 @@ class Strategy:
         # Backtest-replicating entry: open an iron condor once the 30-min
         # window regime is "range" (and filters allow). Re-enter after each
         # close + cooldown until reaching max_position.
+        if self._day_stopped:
+            return
         if self.executor.open_count() >= self.cfg.max_position:
             return
         if self.executor.sl_limit_reached():
@@ -356,6 +361,7 @@ class Strategy:
                 return
             sig = Signal(direction="range", bar=bar,
                          extreme=spot, cvd_extreme=0.0)
+            sig.regime = "range"
             pos = await self.executor.open_iron_condor(condor, credit, sig)
             if pos is None:
                 self._log.warning("range entry: iron condor entry failed")
@@ -423,12 +429,39 @@ class Strategy:
 
     def open_vol_allows(self) -> bool:
         """Open-30min volatility filter: skip the day if the first N minutes'
-        high-low range (in option points) exceeds the configured threshold."""
+        high-low range (in option points) exceeds the configured threshold.
+
+        The result is computed once — when the open window first fills — and
+        persisted to trade_decision.json. Every later call reads that stored
+        value for the day instead of recomputing/overwriting it."""
         thresh = self.cfg.open_vol_filter
         if thresh <= 0:
             return True
-        win_min = self.cfg.open_vol_window_minutes
-        cutoff = self._shift(self.cfg.session_start, win_min)
+        stored = self._read_open_vol()
+        if stored is not None:
+            return stored
+        # no stored decision yet: compute it once the open window is complete
+        day = datetime.now(_eastern()).date()
+        early = self._open_window_bars()
+        if not early:
+            return True  # still before/inside the window, not yet decided
+        cutoff = self._shift(self.cfg.session_start, self.cfg.open_vol_window_minutes)
+        if datetime.now(_eastern()).time() < cutoff:
+            return True  # window not yet over; hold the decision until it is
+        hi = max(b.high for b in early)
+        lo = min(b.low for b in early)
+        # Normalize the signal range into SPY-equivalent points: ES/SPX are ~10x
+        # SPY, so dividing by open_vol_scale gives the same unit as the backtest
+        # (SPX opening range <= 40 points with the default 4.0 threshold).
+        allowed = (hi - lo) / self.cfg.open_vol_scale <= thresh
+        self._persist_open_vol(allowed, day)
+        self._log.info("open-30min volatility filter: day=%s allowed=%s (range=%.2f)",
+                       day, allowed, hi - lo)
+        return allowed
+
+    def _open_window_bars(self) -> list:
+        """Bars that fall inside the open-30min window (session_start .. cutoff)."""
+        cutoff = self._shift(self.cfg.session_start, self.cfg.open_vol_window_minutes)
         early = []
         for b in self.engine.bars:
             t = b.ts
@@ -436,12 +469,16 @@ class Strategy:
                 t = t.astimezone(_eastern())
             if t.time() <= cutoff:
                 early.append(b)
-        if not early:
-            return True  # still before/inside the window, allow (not yet decided)
-        hi = max(b.high for b in early)
-        lo = min(b.low for b in early)
-        scale = self.cfg.spot_scale if self.cfg.option_symbol != self.cfg.symbol else 1.0
-        return (hi - lo) / scale <= thresh
+        return early
+
+    def _read_open_vol(self) -> Optional[bool]:
+        """Return today's stored open_vol_allows from trade_decision.json, or
+        None if today's decision has not been computed yet."""
+        day = datetime.now(_eastern()).date().isoformat()
+        for rec in self._load_trade_decisions():
+            if rec.get("trade_day") == day and "open_vol_allows" in rec:
+                return bool(rec["open_vol_allows"])
+        return None
 
     def prev_day_trend_allows(self) -> bool:
         """Prior-day trend filter: read the open/skip decision from
@@ -485,6 +522,53 @@ class Strategy:
                 return rec.get("decision")
         return None
 
+    def _load_trade_decisions(self) -> list:
+        """Parse data/trade_decision.json into a list of records, tolerant of
+        missing/corrupt files and the legacy single-dict format."""
+        import json
+
+        path = self._trade_decision_path()
+        if not os.path.exists(path):
+            return []
+        try:
+            data = json.load(open(path))
+        except (OSError, json.JSONDecodeError):
+            return []
+        if isinstance(data, dict):
+            data = [data]
+        return data if isinstance(data, list) else []
+
+    def _write_trade_decisions(self, history: list) -> None:
+        import json
+
+        path = self._trade_decision_path()
+        parent = os.path.dirname(path)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+        tmp = path + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(history, f, indent=2)
+        os.replace(tmp, path)
+
+    def _persist_open_vol(self, allowed: bool, day) -> None:
+        """Record today's open-vol filter result into trade_decision.json.
+        Computed once when the open window first fills; not overwritten later."""
+        if hasattr(day, "isoformat"):
+            day = day.isoformat()
+        history = self._load_trade_decisions()
+        updated = False
+        for rec in history:
+            if rec.get("trade_day") == day:
+                rec["open_vol_allows"] = allowed
+                updated = True
+        if not updated:
+            rec = {"trade_day": day, "open_vol_allows": allowed}
+            decision = self._read_trade_decision(day)
+            if decision is not None:
+                rec["decision"] = decision
+            history.append(rec)
+        self._write_trade_decisions(history)
+
     def _generate_trade_decision(self) -> None:
         """Generate today's trade decision by running trade_decision.py."""
         import subprocess
@@ -502,6 +586,51 @@ class Strategy:
         except Exception as e:
             self._log.warning("prev-day trend filter: failed to generate decision: %s", e)
 
+    def _day_stop_path(self) -> str:
+        return self.cfg.day_stop_file
+
+    def _read_day_stop(self, day: str = None) -> bool:
+        """True if a kill-switch day-stop flag exists for ``day`` (default: today, ET)."""
+        if day is None:
+            day = datetime.now(_eastern()).date().isoformat()
+        elif hasattr(day, "isoformat"):
+            day = day.isoformat()
+        path = self._day_stop_path()
+        if not os.path.exists(path):
+            return False
+        try:
+            import json
+
+            with open(path) as f:
+                data = json.load(f)
+        except (OSError, ValueError):
+            return False
+        return data.get("day") == day
+
+    def _handle_day_stop(self) -> None:
+        """If today's kill-switch flag is set, stop trading for the day.
+
+        kill_switch.py flattens the positions directly on IBKR, so here we only
+        drop local tracking (cancelling in-flight close orders to avoid racing
+        the kill switch) and block all new entries until the next session."""
+        if self._day_stopped:
+            return
+        if not self._read_day_stop():
+            return
+        self._day_stopped = True
+        self._log.error("KILL SWITCH: day-stop flag present, stopping trading for the day")
+        if self._entry_task is not None and not self._entry_task.done():
+            self._entry_task.cancel()
+        for pos in list(self.executor.positions.values()):
+            if pos.status != "OPEN":
+                continue
+            if pos.close_trade is not None and not pos.close_trade.isDone():
+                self.ib.cancelOrder(pos.close_trade.order)
+            pos.status = "CLOSED"
+            pos.close_kind = "KILLSWITCH"
+            self._log.warning("position %s cleared by kill switch (flattened externally)", pos.id)
+        self.store.clear_positions()
+
     async def _restore_state(self) -> None:
         """Replay today's persisted bars into a fresh engine and rebuild open positions."""
         day = datetime.now(_eastern()).date()
@@ -517,6 +646,14 @@ class Strategy:
             self._log.info(
                 "restored %d bars, running cvd=%.2f", len(bars), self.engine.running_delta()
             )
+        if self._read_day_stop(day):
+            self._day_stopped = True
+            self._log.error(
+                "KILL SWITCH: day-stop flag present for %s, not restoring open positions", day
+            )
+            self.store.clear_positions()
+            await self._sync_ib_positions()  # flatten anything still open on IBKR
+            return
         for pd in pos_list:
             await self.executor.restore_position(pd)
         await self._sync_ib_positions()
@@ -537,11 +674,15 @@ class Strategy:
             c = ibp.contract
             if c.secType != "OPT" or c.symbol != self.cfg.option_symbol:
                 continue
+            if self.cfg.account and ibp.account != self.cfg.account:
+                continue
             if c.conId in tracked:
                 continue
             action = "BUY" if ibp.position < 0 else "SELL"
             order = MarketOrder(action, abs(ibp.position))
             order.tif = "DAY"
+            if self.cfg.account:
+                order.account = self.cfg.account
             self.ib.placeOrder(c, order)
             self._log.warning(
                 "flattening orphan position %s %s x%s", c.localSymbol, action, abs(ibp.position)
@@ -578,7 +719,9 @@ class Strategy:
                 if self._session_day is not None and now_day != self._session_day:
                     self._session_day = now_day
                     self._last_entry_ts = 0.0
+                    self._day_stopped = False  # kill switch only lasts for one session
                 self.executor.update_session_day(now_day)
+                self._handle_day_stop()
                 if not self.in_trading_hours():
                     if self.executor.has_open_position():
                         self._log.warning("outside trading hours with open position, closing")

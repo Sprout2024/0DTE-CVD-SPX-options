@@ -35,6 +35,7 @@ class Position:
     close_time: float = 0.0
     close_price: float = 0.0
     realized_pnl: float = 0.0
+    regime: str = ""
     log: List[str] = field(default_factory=list)
 
 
@@ -76,8 +77,7 @@ class Executor:
     def _tick_step(price: float) -> float:
         return 0.05 if price >= 3.00 else 0.10
 
-    @staticmethod
-    def _adaptive_limit(side: str, quantity: int, price: float, urgency: str) -> LimitOrder:
+    def _adaptive_limit(self, side: str, quantity: int, price: float, urgency: str) -> LimitOrder:
         """Build an IBKR Adaptive Limit order (auto-seeks fills between bid/ask)."""
         order = LimitOrder(side, quantity, price)
         order.tif = "DAY"
@@ -85,6 +85,8 @@ class Executor:
         order.advancedErrorOverride = "COMBOPAYOUT"
         order.algoStrategy = "Adaptive"
         order.algoParams = [TagValue("adaptivePriority", urgency)]
+        if self.cfg.account:
+            order.account = self.cfg.account
         return order
 
     async def _adaptive_fill(self, combo: Contract, side: str, limit: float,
@@ -95,6 +97,10 @@ class Executor:
         interval. ``urgency`` = "Patient" | "Normal" | "Urgent".
         Returns the filled Trade or None on timeout.
         """
+        if self.cfg.dry_run:
+            self._log.info("DRY-RUN %s %s @ %.2f (adaptive %s) -- no real order",
+                           side, quantity, limit, urgency)
+            return self._fake_trade(combo, side, quantity, limit)
         order = self._adaptive_limit(side, quantity, limit, urgency)
         trade = self.ib.placeOrder(combo, order)
         self._log.info("%s %s @ %.2f (adaptive %s)", side, quantity, order.lmtPrice, urgency)
@@ -108,6 +114,32 @@ class Executor:
             self._log.warning("%s order done without fills", side)
             return None
         return trade
+
+    def _fake_trade(self, combo: Contract, side: str, quantity: int, price: float) -> Trade:
+        """Build a synthetic filled Trade for dry-run observation mode (no real order)."""
+        from datetime import datetime, timezone
+
+        from ib_insync import LimitOrder
+        from ib_insync.objects import Execution, Fill
+        from ib_insync.order import OrderStatus, Trade as _Trade
+
+        order = LimitOrder(side, quantity, price)
+        order.tif = "DAY"
+        if self.cfg.account:
+            order.account = self.cfg.account
+        execution = Execution(
+            execId="DRY", time="", acctNumber=self.cfg.account or "", exchange="",
+            side=side, shares=quantity, price=price, permId=0, clientId=0, orderId=0,
+            liquidation=0, cumQty=quantity, avgPrice=price, orderRef="", evRule="",
+            evMultiplier=0.0, modelCode="", lastLiquidity=0,
+        )
+        fill = Fill(combo, execution, None, datetime.now(timezone.utc))
+        order_status = OrderStatus(
+            orderId=0, status="Filled", filled=quantity, remaining=0.0,
+            avgFillPrice=price, permId=0, parentId=0, lastFillPrice=price,
+            clientId=0, whyHeld="", mktCapPrice=0.0,
+        )
+        return _Trade(combo, order, order_status, fills=[fill], log=[], advancedError="")
 
     async def open_position(self, spread: Spread, credit: float, signal: Signal) -> Optional[Position]:
         if credit is None or credit <= 0:
@@ -137,9 +169,12 @@ class Executor:
             signal_cvd=signal.cvd_extreme,
             tp_target=round(avg * (1.0 - self.cfg.take_profit_pct), 2),
             sl_price=round(avg * (1.0 + self.cfg.stop_loss_pct), 2),
+            regime=getattr(signal, "regime", ""),
         )
         self.positions[pos.id] = pos
         self._persist()
+        if self.store is not None:
+            self.store.save_trade_open(pos)
         self._log.info(
             "position %s OPEN %s credit=%.2f tp=%.2f sl=%.2f extreme=%.2f",
             pos.id, pos.direction, avg, pos.tp_target, pos.sl_price, signal.extreme,
@@ -175,9 +210,12 @@ class Executor:
             tp_target=round(avg * (1.0 - self.cfg.iron_condor_take_profit_pct), 2),
             sl_price=round(avg * (1.0 + self.cfg.iron_condor_stop_loss_pct), 2),
             condor=condor,
+            regime=getattr(signal, "regime", ""),
         )
         self.positions[pos.id] = pos
         self._persist()
+        if self.store is not None:
+            self.store.save_trade_open(pos)
         self._log.info(
             "position %s IRON-CONDOR OPEN credit=%.2f tp=%.2f sl=%.2f",
             pos.id, avg, pos.tp_target, pos.sl_price,
@@ -372,33 +410,45 @@ class Executor:
         bid, ask = self._pos_ba(pos)
         limit = self._limit_for("BUY", bid, ask)
         if limit is None:
-            await self._market_close(pos)
+            await self._market_close(pos, skip_adaptive=True)
             return
+        # Risk exits (SL/TECH) escalate to market quickly; profit exits (TP/TIME)
+        # can be patient so Adaptive has time to seek a good fill.
+        patience = (self.cfg.close_patience_seconds
+                    if kind in ("SL", "TECH")
+                    else self.cfg.close_patience_seconds * 4)
         trade = await self._adaptive_fill(self._combo(pos), "BUY", limit,
-                                          self.cfg.close_patience_seconds * 4, pos.quantity, "Urgent")
+                                          patience, pos.quantity, "Urgent")
         if trade is None:
             self._log.warning("position %s %s close not filled (adaptive), escalating", pos.id, kind)
-            await self._market_close(pos)
+            await self._market_close(pos, skip_adaptive=True)
             return
         self._finalize_close(pos, trade)
 
-    async def _market_close(self, pos: Position) -> None:
-        bid, ask = self._pos_ba(pos)
-        limit = self._limit_for("BUY", bid, ask)
-        if limit is not None:
-            order = self._adaptive_limit("BUY", pos.quantity, limit, "Urgent")
-            trade = self.ib.placeOrder(self._combo(pos), order)
-            self._log.info("position %s close %s @ %.2f (adaptive urgent)", pos.id, pos.close_kind or "MANUAL", order.lmtPrice)
-            ok = await self._wait(trade, 8)
-            if ok:
-                self._finalize_close(pos, trade)
-                return
-            if not trade.isDone():
-                self.ib.cancelOrder(order)
-            self._log.warning("position %s mid close not filled, escalating to market", pos.id)
+    async def _market_close(self, pos: Position, skip_adaptive: bool = False) -> None:
+        if self.cfg.dry_run:
+            self._log.info("DRY-RUN market close %s -- no real order", pos.id)
+            self._finalize_close(pos, self._fake_trade(self._combo(pos), "BUY", pos.quantity, 0.0))
+            return
+        if not skip_adaptive:
+            bid, ask = self._pos_ba(pos)
+            limit = self._limit_for("BUY", bid, ask)
+            if limit is not None:
+                order = self._adaptive_limit("BUY", pos.quantity, limit, "Urgent")
+                trade = self.ib.placeOrder(self._combo(pos), order)
+                self._log.info("position %s close %s @ %.2f (adaptive urgent)", pos.id, pos.close_kind or "MANUAL", order.lmtPrice)
+                ok = await self._wait(trade, 8)
+                if ok:
+                    self._finalize_close(pos, trade)
+                    return
+                if not trade.isDone():
+                    self.ib.cancelOrder(order)
+                self._log.warning("position %s mid close not filled, escalating to market", pos.id)
         order = MarketOrder("BUY", pos.quantity)
         order.tif = "DAY"
         order.advancedErrorOverride = "COMBOPAYOUT"
+        if self.cfg.account:
+            order.account = self.cfg.account
         trade = self.ib.placeOrder(self._combo(pos), order)
         self._log.info("position %s market close %s", pos.id, pos.close_kind or "MANUAL")
         ok = await self._wait(trade, 15)
@@ -423,6 +473,8 @@ class Executor:
             pos.id, pos.close_kind, pos.entry_credit, avg, pos.realized_pnl, held,
             self._daily_sl_count, self.cfg.max_daily_sl,
         )
+        if self.store is not None:
+            self.store.save_trade_close(pos)
         if pos.condor is not None:
             for t in self.selector.iron_condor_legs(pos.condor):
                 self.ib.cancelMktData(t)

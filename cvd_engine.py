@@ -22,6 +22,7 @@ class Bar:
     cvd_close: float = 0.0
     cvd_delta: float = 0.0
     iv: float = 0.0
+    regime: str = "none"
 
     def update(self, price: float, size: float, total_delta: float) -> None:
         self.ticks += 1
@@ -45,6 +46,7 @@ class Signal:
     bar: Bar
     extreme: float
     cvd_extreme: float
+    regime: str = ""
 
 
 class CvdEngine:

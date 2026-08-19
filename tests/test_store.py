@@ -1,4 +1,5 @@
 import asyncio
+import json
 import sys
 from datetime import date, datetime
 from pathlib import Path
@@ -34,9 +35,9 @@ def test_store_roundtrip():
     d = date(2026, 8, 17)
     ts = datetime(2026, 8, 17, 9, 30, 0)
     bars = [
-        Bar(ts=ts.replace(minute=30), open=590, high=591, low=589.5, close=590.5, volume=100, ticks=5, cvd_open=0, cvd_high=10, cvd_low=0, cvd_close=10, cvd_delta=10),
-        Bar(ts=ts.replace(minute=31), open=590.5, high=592, low=590, close=591.5, volume=150, ticks=8, cvd_open=10, cvd_high=25, cvd_low=10, cvd_close=25, cvd_delta=15),
-        Bar(ts=ts.replace(minute=32), open=591.5, high=591.8, low=589, close=589.5, volume=120, ticks=6, cvd_open=25, cvd_high=25, cvd_low=5, cvd_close=5, cvd_delta=-20, iv=0.185),
+        Bar(ts=ts.replace(minute=30), open=590, high=591, low=589.5, close=590.5, volume=100, ticks=5, cvd_open=0, cvd_high=10, cvd_low=0, cvd_close=10, cvd_delta=10, regime="range"),
+        Bar(ts=ts.replace(minute=31), open=590.5, high=592, low=590, close=591.5, volume=150, ticks=8, cvd_open=10, cvd_high=25, cvd_low=10, cvd_close=25, cvd_delta=15, regime="up"),
+        Bar(ts=ts.replace(minute=32), open=591.5, high=591.8, low=589, close=589.5, volume=120, ticks=6, cvd_open=25, cvd_high=25, cvd_low=5, cvd_close=5, cvd_delta=-20, iv=0.185, regime="down"),
     ]
     with tempfile.TemporaryDirectory() as tmp:
         path = str(Path(tmp) / "state.jsonl")
@@ -49,6 +50,8 @@ def test_store_roundtrip():
         assert len(restored) == 3, f"expected 3 bars, got {len(restored)}"
         for a, b in zip(bars, restored):
             assert a.ts == b.ts and a.cvd_close == b.cvd_close and a.ticks == b.ticks and a.iv == b.iv
+            assert a.regime == b.regime, f"regime mismatch: {a.regime} vs {b.regime}"
+        print("OK regime persisted in bar roundtrip:", [b.regime for b in restored])
         cfg = Config(state_file="")
         eng = CvdEngine(cfg)
         for b in restored:
@@ -153,9 +156,51 @@ async def test_engine_restore_recomputes_cvd():
         print("OK engine restore reproduces signal:", restored_signal)
 
 
+def test_trade_log():
+    import tempfile
+
+    class FakePos:
+        id = "P1"
+        direction = "range"
+        quantity = 1
+        entry_time = 1780000000.0
+        entry_credit = 2.50
+        tp_target = 0.75
+        sl_price = 3.75
+        signal_extreme = 590.0
+        signal_cvd = 100.0
+        regime = "range"
+        condor = type("C", (), {"expiry": "20260821"})()
+        spread = None
+        close_kind = "TP"
+        close_price = 0.50
+        realized_pnl = 200.0
+
+    with tempfile.TemporaryDirectory() as tmp:
+        state = str(Path(tmp) / "state.jsonl")
+        trades = str(Path(tmp) / "trades.jsonl")
+        store = CvdStore(state, trades_path=trades, account="U1")
+        store.save_trade_open(FakePos())
+        FakePos.close_price = 0.50
+        store.save_trade_close(FakePos())
+        lines = [json.loads(l) for l in open(trades) if l.strip()]
+        assert len(lines) == 2, lines
+        assert lines[0]["event"] == "open"
+        assert lines[0]["id"] == "P1"
+        assert lines[0]["type"] == "iron_condor"
+        assert lines[0]["regime"] == "range"
+        assert lines[0]["account"] == "U1"
+        assert lines[0]["entry_credit"] == 2.50
+        assert lines[1]["event"] == "close"
+        assert lines[1]["kind"] == "TP"
+        assert lines[1]["realized_pnl"] == 200.0
+        print("OK trade log open/close:", [l["event"] for l in lines])
+
+
 if __name__ == "__main__":
     test_roundtrip_bars()
     test_store_roundtrip()
     test_store_position_roundtrip()
+    test_trade_log()
     asyncio.run(test_engine_restore_recomputes_cvd())
     print("ALL STORE TESTS PASSED")

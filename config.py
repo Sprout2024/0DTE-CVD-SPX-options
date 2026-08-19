@@ -11,6 +11,8 @@ class Config:
     host: str = "127.0.0.1"
     port: int = 7497
     client_id: int = 30
+    account: str = "U18853178"  # IBKR account id to trade; empty = default
+    dry_run: bool = False  # True = observe only, never place real orders
     symbol: str = "ES"
     signal_sec_type: str = "FUT"
     signal_exchange: str = "CME"
@@ -39,6 +41,9 @@ class Config:
     # open-30min volatility filter (points): skip the day if first 30 min range exceeds this
     open_vol_filter: float = 4.0  # 0 = disabled
     open_vol_window_minutes: int = 30
+    # SPX/SPY ratio used to normalize the signal range into SPY-equivalent points
+    # for the open-vol filter. Signal ES/SPX (~10x SPY) => 10.0; signal SPY => 1.0.
+    open_vol_scale: float = 10.0
     # prior-day trend filter (15-min closes slope, points/15min): skip if |slope| > this
     prev_day_trend_filter: float = 2.0  # 0 = disabled
     prev_day_trend_window_minutes: int = 120
@@ -57,7 +62,7 @@ class Config:
     session_end: time = time(16, 0)
     no_trade_first_minutes: int = 15
     no_trade_last_minutes: int = 30
-    max_position: int = 5
+    max_position: int = 3
     cooldown_seconds: int = 600
     max_daily_sl: int = 2
     min_signal_spacing: float = 0.30
@@ -91,4 +96,6 @@ class Config:
     log_file: str = "cvd_strategy.log"
     state_file: str = "data/cvd_state.jsonl"
     signals_file: str = "data/signals.jsonl"
+    trades_file: str = "data/trades.jsonl"  # per-trade open/close detail log
+    day_stop_file: str = "data/day_stop.json"  # kill switch flag: strategy stops trading for the day
     reconnect_retry_seconds: float = 5.0
