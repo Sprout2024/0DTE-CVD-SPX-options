@@ -93,7 +93,7 @@ class CvdStore:
                 "co": bar.cvd_open, "ch": bar.cvd_high, "cl": bar.cvd_low,
                 "cc": bar.cvd_close, "cd": bar.cvd_delta,
                 "iv": bar.iv,
-                "r": bar.regime,
+                "r30": bar.regime_30m,
             }
         )
 
@@ -247,5 +247,5 @@ class CvdStore:
             cvd_open=rec["co"], cvd_high=rec["ch"], cvd_low=rec["cl"],
             cvd_close=rec["cc"], cvd_delta=rec["cd"],
             iv=rec.get("iv", 0.0),
-            regime=rec.get("r", "none"),
+            regime_30m=rec.get("r30", "none"),
         )

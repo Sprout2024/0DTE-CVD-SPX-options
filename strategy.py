@@ -185,12 +185,12 @@ class Strategy:
                 bar = self.engine.add_trade(price, size, delta, tick.time)
                 if bar is not None:
                     bar.iv = round(self.engine.realized_iv(), 4)
-                    self._on_new_bar(bar)  # updates trend + sets bar.regime
+                    self._on_new_bar(bar)  # updates trend + sets bar.regime_30m
                     self.store.append_bar(bar)
 
     def _on_new_bar(self, bar: Bar) -> None:
         self.trend.update(bar)
-        bar.regime = self.trend.regime()
+        bar.regime_30m = self._regime_30min()
         # Record CVD divergence signals for analysis (does not drive entry).
         signal = self.engine.detect_signal()
         if signal is not None:

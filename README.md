@@ -14,7 +14,7 @@
 - **一键清仓 + 停止当天交易**：新增 `kill_switch.py`，写 day-stop 标记（`data/day_stop.json`）让运行中的 `main.py` 停止开新仓，并直接用 **IBKR Adaptive 限价单**（BUY 锚定卖一、SELL 锚定买一，在 bid/ask 间寻最优成交）清掉账户期权持仓，超时/无报价才降级市价单兜底
 - **开盘波动过滤单位修正**：原实盘用 `spot_scale`（ES 下为 1.0）归一化，导致把 SPX 波幅按 4 点阈值误判（比回测严格 10 倍）。新增 `open_vol_scale=10.0`（ES/SPX→SPY 等价点换算），与回测语义一致（SPX 开盘 30 分钟 ≤40 点）
 - **开盘波动过滤单次计算**：`open_vol_allows` 改为开盘窗口（09:30–10:00）结束时**一次性**计算并写入 `data/trade_decision.json`，之后整天只读取该固定值，不再重算/覆盖
-- **bar 落盘带 regime**：`data/cvd_state.jsonl` 每分钟 bar 新增 `r` 字段（range/up/down/none）
+- **bar 落盘带 30 分钟 regime**：`data/cvd_state.jsonl` 每分钟 bar 新增 `r30` 字段（range/up/down/none，即 `_regime_30min` 的 30 分钟窗口判定）
 - **独立交易明细日志**：新增 `data/trades.jsonl`（`--trades-file`），每笔开仓（腿/权利金/TP/SL/regime）+ 平仓（离场原因/盈亏/持仓时长）
 - **风险离场加速**：SL/TECH 离场快速降级市价单，避免亏损持仓长时间挂 Adaptive 单
 
@@ -174,7 +174,7 @@ python -m venv .venv
 
 数据文件统一存于 `data/`（已 gitignore）：
 
-- **`data/cvd_state.jsonl`**（`--state-file`）：每分钟 bar（含 CVD + regime）+ 多持仓快照（`pos_snapshot`），重启后恢复
+- **`data/cvd_state.jsonl`**（`--state-file`）：每分钟 bar（含 CVD + 30 分钟 regime `r30`）+ 多持仓快照（`pos_snapshot`），重启后恢复
 - **`data/trade_decision.json`**：当日是否开仓决策（前一天趋势过滤）+ 实时 `open_vol_allows`
 - **`data/day_stop.json`**：一键清仓 kill switch 的当日停止交易标记（`kill_switch.py` 写入）
 - **`data/trades.jsonl`**（`--trades-file`）：每笔开/平仓明细（开仓含腿/权利金/TP/SL/regime，平仓含离场原因/盈亏/持仓时长）
