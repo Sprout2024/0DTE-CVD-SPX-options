@@ -164,8 +164,6 @@ class Strategy:
                 self._ask = tick.price
         for tick in ticker.ticks:
             if tick.tickType == 4 and tick.size > 0:
-                if not self._tick_in_rth(tick.time):
-                    continue
                 price = float(tick.price)
                 size = float(tick.size)
                 bid, ask = self._bid, self._ask
@@ -178,6 +176,8 @@ class Strategy:
                 else:
                     delta = 0.0
                 self._last_spot = price
+                if not self._tick_in_rth(tick.time):
+                    continue
                 bar = self.engine.add_trade(price, size, delta, tick.time)
                 if bar is not None:
                     bar.iv = round(self.engine.realized_iv(), 4)

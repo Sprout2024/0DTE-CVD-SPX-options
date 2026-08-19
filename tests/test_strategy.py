@@ -235,7 +235,7 @@ async def main():
 
 
 async def test_rth_gate():
-    """Outside 09:30-16:00 ET ticks must NOT build/record CVD bars."""
+    """Outside 09:30-16:00 ET: spot updates but no CVD bars are built/recorded."""
     with TemporaryDirectory() as tmp:
         cfg = Config(
             divergence_lookback=3, min_ticks_per_bar=1,
@@ -252,13 +252,14 @@ async def test_rth_gate():
         ticker = strat.spot_ticker
         today = datetime.now(ZoneInfo("America/New_York")).date()
 
-        # feed an out-of-hours tick (08:00 ET) -> no processing
+        # out-of-hours tick (08:00 ET): spot updates, no CVD bar
         emit_trade(ib, ticker, 590.0, 100, 1, datetime(today.year, today.month, today.day, 8, 0, 0))
         await asyncio.sleep(0.2)
-        assert strat._last_spot is None, f"out-of-hours should not update spot, got {strat._last_spot}"
-        print("OK RTH gate: 08:00 tick ignored")
+        assert strat._last_spot == 590.0, f"out-of-hours must still update spot, got {strat._last_spot}"
+        assert len(strat.engine.bars) == 0, f"out-of-hours must build no bars, got {len(strat.engine.bars)}"
+        print("OK RTH gate: 08:00 tick updates spot, builds no bars")
 
-        # feed an in-hours tick (10:00 ET) -> processed
+        # in-hours tick (10:00 ET): processed normally
         emit_trade(ib, ticker, 591.0, 100, 1, datetime(today.year, today.month, today.day, 10, 0, 0))
         await asyncio.sleep(0.2)
         assert strat._last_spot == 591.0, f"in-hours should update spot, got {strat._last_spot}"
