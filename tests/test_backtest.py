@@ -157,7 +157,8 @@ async def test_minute_deltas():
 
 
 async def test_backtest_condor():
-    """regime_filter=True -> range regime opens iron condors, trend regimes skip."""
+    """regime_filter=True: insufficient hourly data -> "none" -> NO trade (safety).
+    A resolved "range" regime opens iron condors; trend regimes skip."""
     cfg = Config(
         divergence_lookback=3,
         min_ticks_per_bar=1,
@@ -180,13 +181,11 @@ async def test_backtest_condor():
     bt = Backtester(cfg, OptionPricer(iv=0.20), log=__import__("logging").getLogger("btc"))
     bt.strikes = [round(450 + i * 1.0, 1) for i in range(400)]
     bt.run_ticks(ticks)
-    # insufficient hourly data -> regime "range" -> iron condor trade(s), no spread
+    # only 6 minutes of data -> insufficient hourly closes -> regime "none" -> no trade
     stats = bt.report()
-    print("condor-mode stats:", {k: v for k, v in stats.items() if k != "equity_curve"})
-    assert stats["trades"] >= 1, f"expected condor trades, got {stats}"
-    assert all(t["direction"] == "range" for t in bt.trades)
-    assert all(t["cost"] == 6.40 for t in bt.trades), [t["cost"] for t in bt.trades]
-    print("OK backtest condor mode")
+    print("condor-mode stats (insufficient data):", {k: v for k, v in stats.items() if k != "equity_curve"})
+    assert stats["trades"] == 0, f"expected no trade on insufficient data, got {stats}"
+    print("OK backtest condor mode (insufficient data -> no trade)")
 
 
 if __name__ == "__main__":

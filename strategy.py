@@ -73,6 +73,8 @@ class Strategy:
         self._last_signal: Optional[Signal] = None
         self._entry_task: Optional[asyncio.Task] = None
         self._last_breakout_ts = 0.0
+        self._session_day = None
+        self._last_entry_ts = 0.0
         self.running = True
         self._tickers_subscribed = False
         self._log = logging.getLogger("strategy")
@@ -186,16 +188,42 @@ class Strategy:
 
     def _on_new_bar(self, bar: Bar) -> None:
         self.trend.update(bar)
+        # Record CVD divergence signals for analysis (does not drive entry).
         signal = self.engine.detect_signal()
         if signal is not None:
             self._record_signal(signal)
-            self._on_signal(signal)
         regime = self.trend.regime()
         if regime in ("up", "down"):
             bo = self.engine.detect_breakout()
             if bo is not None and time.time() - self._last_breakout_ts >= self.cfg.breakout_cooldown:
                 self._record_breakout(bo, bar)
                 self._last_breakout_ts = time.time()
+        # Backtest-replicating entry: open an iron condor once the 30-min
+        # window regime is "range" (and filters allow). Re-enter after each
+        # close + cooldown until reaching max_position.
+        if self.executor.open_count() >= self.cfg.max_position:
+            return
+        if self.executor.sl_limit_reached():
+            self._log.info("entry skipped (daily SL limit reached)")
+            return
+        if self._entry_task is not None and not self._entry_task.done():
+            return
+        if not self.in_trading_hours():
+            return
+        if not self.open_vol_allows():
+            self._log.info("entry skipped (open-30min volatility filter)")
+            return
+        if not self.prev_day_trend_allows():
+            self._log.info("entry skipped (prior-day trend filter)")
+            return
+        if not self._cooldown_elapsed():
+            return
+        if self._regime_30min() != "range":
+            return
+        self._log.info(
+            "30min-range entry triggered bar=%s", bar.ts,
+        )
+        self._entry_task = asyncio.ensure_future(self._execute_range_entry(bar))
 
     def _record_breakout(self, bo: dict, bar: Bar) -> None:
         """Append a CVD strong-momentum breakout signal (trend regime) to the signals file."""
@@ -249,6 +277,12 @@ class Strategy:
             return
         if not self.entry_allowed():
             return
+        if not self.open_vol_allows():
+            self._log.info("signal %s skipped (open-30min volatility filter)", signal.direction)
+            return
+        if not self.prev_day_trend_allows():
+            self._log.info("signal %s skipped (prior-day trend filter)", signal.direction)
+            return
         self._last_signal = signal
         self._log.info(
             "signal %s bar=%s extreme=%.2f cvd_extreme=%.2f",
@@ -300,6 +334,38 @@ class Strategy:
         except Exception as e:
             self._log.exception("execute signal failed: %s", e)
 
+    async def _execute_range_entry(self, bar: Bar) -> None:
+        """Backtest-replicating entry: build an iron condor at the current spot
+        and open it. Called when the 30-min regime is range and cooldown passed."""
+        try:
+            spot = self._option_spot()
+            if spot is None:
+                self._log.warning("range entry: no option spot available")
+                return
+            condor = await self.selector.build_iron_condor(spot)
+            if condor is None:
+                self._log.warning("range entry: no iron condor built")
+                return
+            credit = self.selector.iron_condor_mid(condor)
+            if credit is None:
+                self._log.warning("range entry: no iron-condor quote available")
+                return
+            if credit < self.cfg.min_entry_credit or credit > self.cfg.max_entry_credit:
+                self._log.warning("range entry: condor credit %.2f outside [%.2f, %.2f]",
+                                  credit, self.cfg.min_entry_credit, self.cfg.max_entry_credit)
+                return
+            sig = Signal(direction="range", bar=bar,
+                         extreme=spot, cvd_extreme=0.0)
+            pos = await self.executor.open_iron_condor(condor, credit, sig)
+            if pos is None:
+                self._log.warning("range entry: iron condor entry failed")
+            else:
+                self._mark_entry()
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            self._log.exception("range entry failed: %s", e)
+
     def _shift(self, t: dtime, minutes: int) -> dtime:
         """Shift a time-of-day by +/- minutes (helper for no-trade windows)."""
         from datetime import timedelta
@@ -328,10 +394,120 @@ class Strategy:
             return False
         return True
 
+    def _regime_30min(self) -> str:
+        """1-minute-window range gate (mirrors the backtest): returns
+        'range' if the last ``regime_min_window`` closes have |slope| <=
+        ``regime_min_slope`` (points/min), else 'up'/'down', or 'none' if
+        there isn't enough data yet."""
+        from statistics import linear_regression
+
+        lb = self.cfg.regime_min_window
+        closes = [b.close for b in self.engine.bars]
+        w = closes[-lb:]
+        if len(w) < lb:
+            return "none"
+        slope, _ = linear_regression(list(range(len(w))), w)
+        if abs(slope) <= self.cfg.regime_min_slope:
+            return "range"
+        return "up" if slope > 0 else "down"
+
+    def _cooldown_elapsed(self) -> bool:
+        """True once the 10-min entry cooldown has elapsed since the last entry.
+        Before the first entry of the day, cooldown is satisfied."""
+        if self._last_entry_ts == 0.0:
+            return True
+        return time.time() - self._last_entry_ts >= self.cfg.cooldown_seconds
+
+    def _mark_entry(self) -> None:
+        self._last_entry_ts = time.time()
+
+    def open_vol_allows(self) -> bool:
+        """Open-30min volatility filter: skip the day if the first N minutes'
+        high-low range (in option points) exceeds the configured threshold."""
+        thresh = self.cfg.open_vol_filter
+        if thresh <= 0:
+            return True
+        win_min = self.cfg.open_vol_window_minutes
+        cutoff = self._shift(self.cfg.session_start, win_min)
+        early = []
+        for b in self.engine.bars:
+            t = b.ts
+            if t.tzinfo is not None:
+                t = t.astimezone(_eastern())
+            if t.time() <= cutoff:
+                early.append(b)
+        if not early:
+            return True  # still before/inside the window, allow (not yet decided)
+        hi = max(b.high for b in early)
+        lo = min(b.low for b in early)
+        scale = self.cfg.spot_scale if self.cfg.option_symbol != self.cfg.symbol else 1.0
+        return (hi - lo) / scale <= thresh
+
+    def prev_day_trend_allows(self) -> bool:
+        """Prior-day trend filter: read the open/skip decision from
+        data/trade_decision.json for today's trade_day. If the file is missing
+        or has no entry for today, generate it by running trade_decision.py."""
+        thresh = self.cfg.prev_day_trend_filter
+        if thresh <= 0:
+            return True
+        today = datetime.now(_eastern()).date().isoformat()
+        decision = self._read_trade_decision(today)
+        if decision is None:
+            self._generate_trade_decision()
+            decision = self._read_trade_decision(today)
+        if decision is None:
+            self._log.warning("prev-day trend filter: no decision for %s, allowing", today)
+            return True
+        self._log.info("prev-day trend filter: trade_day=%s decision=%s", today, decision)
+        return decision == "open"
+
+    def _trade_decision_path(self) -> str:
+        return os.path.join(os.path.dirname(self.cfg.state_file), "trade_decision.json")
+
+    def _read_trade_decision(self, trade_day: str):
+        """Return the decision ('open'/'skip'/'unknown') for ``trade_day`` from
+        data/trade_decision.json, or None if not present."""
+        import json
+
+        path = self._trade_decision_path()
+        if not os.path.exists(path):
+            return None
+        try:
+            data = json.load(open(path))
+        except (OSError, json.JSONDecodeError):
+            return None
+        if isinstance(data, dict):
+            data = [data]
+        if not isinstance(data, list):
+            return None
+        for rec in data:
+            if rec.get("trade_day") == trade_day:
+                return rec.get("decision")
+        return None
+
+    def _generate_trade_decision(self) -> None:
+        """Generate today's trade decision by running trade_decision.py."""
+        import subprocess
+        import sys
+
+        today = datetime.now(_eastern()).date().isoformat()
+        try:
+            script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "trade_decision.py")
+            subprocess.run(
+                [sys.executable, script, "--date", today],
+                capture_output=True, timeout=30,
+                cwd=os.path.dirname(os.path.abspath(__file__)),
+            )
+            self._log.info("prev-day trend filter: generated trade_decision.json")
+        except Exception as e:
+            self._log.warning("prev-day trend filter: failed to generate decision: %s", e)
+
     async def _restore_state(self) -> None:
-        """Replay today's persisted bars into a fresh engine and rebuild the open position."""
+        """Replay today's persisted bars into a fresh engine and rebuild open positions."""
         day = datetime.now(_eastern()).date()
-        bars, pos_data = self.store.load(day)
+        self._session_day = day
+        self.executor.update_session_day(day)
+        bars, pos_list = self.store.load(day)
         if bars:
             self.engine = CvdEngine(self.cfg)
             self.trend.reset()
@@ -341,8 +517,8 @@ class Strategy:
             self._log.info(
                 "restored %d bars, running cvd=%.2f", len(bars), self.engine.running_delta()
             )
-        if pos_data is not None:
-            await self.executor.restore_position(pos_data)
+        for pd in pos_list:
+            await self.executor.restore_position(pd)
         await self._sync_ib_positions()
 
     async def _sync_ib_positions(self) -> None:
@@ -350,8 +526,13 @@ class Strategy:
         await self.ib.reqPositionsAsync()
         tracked = set()
         for p in self.executor.positions.values():
-            tracked.add(p.spread.short_leg.conId)
-            tracked.add(p.spread.long_leg.conId)
+            if p.condor is not None:
+                for leg in (p.condor.short_call, p.condor.long_call,
+                            p.condor.short_put, p.condor.long_put):
+                    tracked.add(leg.conId)
+            else:
+                tracked.add(p.spread.short_leg.conId)
+                tracked.add(p.spread.long_leg.conId)
         for ibp in self.ib.positions():
             c = ibp.contract
             if c.secType != "OPT" or c.symbol != self.cfg.option_symbol:
@@ -393,6 +574,11 @@ class Strategy:
                 if not self.ib.isConnected():
                     await self._reconnect()
                     continue
+                now_day = datetime.now(_eastern()).date()
+                if self._session_day is not None and now_day != self._session_day:
+                    self._session_day = now_day
+                    self._last_entry_ts = 0.0
+                self.executor.update_session_day(now_day)
                 if not self.in_trading_hours():
                     if self.executor.has_open_position():
                         self._log.warning("outside trading hours with open position, closing")

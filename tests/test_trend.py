@@ -51,8 +51,8 @@ def test_range():
 def test_insufficient_data():
     det = TrendDetector(_cfg())
     _feed(det, [(0, 100), (1, 101)])
-    assert det.regime() == "range", det.regime()
-    print("OK insufficient -> range")
+    assert det.regime() == "none", det.regime()
+    print("OK insufficient -> none")
 
 
 def test_reset():
@@ -60,7 +60,7 @@ def test_reset():
     _feed(det, [(0, 100), (1, 110), (2, 120), (3, 130)])
     assert det.regime() == "up"
     det.reset()
-    assert det.regime() == "range"
+    assert det.regime() == "none"
     print("OK reset")
 
 

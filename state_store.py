@@ -113,16 +113,57 @@ class CvdStore:
             base["expiry"] = pos.spread.expiry
         self._append({"k": "pos", "d": day, "pos": base})
 
+    def save_positions(self, positions: List) -> None:
+        """Persist a snapshot of all open positions (replacing prior pos records).
+
+        Each position is stored with a per-position "id" so multiple concurrent
+        positions can be restored correctly."""
+        day = _et_now_day().isoformat()
+        snap = [self._pos_to_dict(p) for p in positions]
+        self._append({"k": "pos_snapshot", "d": day, "positions": snap})
+
+    @staticmethod
+    def _pos_to_dict(pos) -> dict:
+        day = datetime.fromtimestamp(pos.entry_time, _ET).date().isoformat()
+        base = {
+            "id": pos.id,
+            "direction": pos.direction,
+            "quantity": pos.quantity,
+            "entry_time": pos.entry_time,
+            "entry_credit": pos.entry_credit,
+            "signal_extreme": pos.signal_extreme,
+            "signal_cvd": pos.signal_cvd,
+            "tp_target": pos.tp_target,
+            "sl_price": pos.sl_price,
+        }
+        if pos.condor is not None:
+            base["condor"] = {
+                "expiry": pos.condor.expiry,
+                "short_call": pos.condor.short_call.strike,
+                "long_call": pos.condor.long_call.strike,
+                "short_put": pos.condor.short_put.strike,
+                "long_put": pos.condor.long_put.strike,
+            }
+        else:
+            base["right"] = "P" if pos.direction == "bull" else "C"
+            base["sell_strike"] = pos.spread.short_leg.strike
+            base["buy_strike"] = pos.spread.long_leg.strike
+            base["expiry"] = pos.spread.expiry
+        return base
+
     def clear_position(self) -> None:
         self._append({"k": "pos_done", "d": _et_now_day().isoformat()})
 
-    def load(self, day: date) -> Tuple[List[Bar], Optional[Dict]]:
-        """Return (bars, position_dict) persisted for ``day``."""
+    def clear_positions(self) -> None:
+        self._append({"k": "pos_snapshot", "d": _et_now_day().isoformat(), "positions": []})
+
+    def load(self, day: date) -> Tuple[List[Bar], List[Dict]]:
+        """Return (bars, open_positions) persisted for ``day``."""
         day_s = day.isoformat()
         bars: List[Bar] = []
-        pos: Optional[Dict] = None
+        positions: List[Dict] = []
         if not os.path.exists(self.path):
-            return bars, pos
+            return bars, positions
         with open(self.path, "r") as f:
             for line in f:
                 line = line.strip()
@@ -137,11 +178,16 @@ class CvdStore:
                 k = rec.get("k")
                 if k == "bar":
                     bars.append(self._bar_from_rec(rec))
+                elif k == "pos_snapshot":
+                    positions = [p for p in rec.get("positions", []) if p.get("status", "OPEN") == "OPEN"]
                 elif k == "pos":
-                    pos = rec.get("pos")
+                    # legacy single-pos record (kept for backward compatibility)
+                    p = dict(rec.get("pos", {}))
+                    p["status"] = "OPEN"
+                    positions = [p]
                 elif k == "pos_done":
-                    pos = None
-        return bars, pos
+                    positions = []
+        return bars, positions
 
     @staticmethod
     def _bar_from_rec(rec: dict) -> Bar:

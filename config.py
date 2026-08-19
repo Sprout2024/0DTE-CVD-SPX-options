@@ -33,6 +33,15 @@ class Config:
     regime_filter: bool = True
     trend_lookback_hours: int = 4
     trend_slope_threshold: float = 5.0
+    # 1-minute window range gate (replaces/extends hourly regime for condor entry)
+    regime_min_window: int = 30
+    regime_min_slope: float = 0.15  # |slope| <= this (points/min) => range
+    # open-30min volatility filter (points): skip the day if first 30 min range exceeds this
+    open_vol_filter: float = 4.0  # 0 = disabled
+    open_vol_window_minutes: int = 30
+    # prior-day trend filter (15-min closes slope, points/15min): skip if |slope| > this
+    prev_day_trend_filter: float = 2.0  # 0 = disabled
+    prev_day_trend_window_minutes: int = 120
     iron_condor_offset: float = 30.0
     iron_condor_wing: float = 25.0
     iron_condor_take_profit_pct: float = 0.70
@@ -48,8 +57,9 @@ class Config:
     session_end: time = time(16, 0)
     no_trade_first_minutes: int = 15
     no_trade_last_minutes: int = 30
-    max_position: int = 1
-    cooldown_seconds: int = 120
+    max_position: int = 5
+    cooldown_seconds: int = 600
+    max_daily_sl: int = 2
     min_signal_spacing: float = 0.30
     entry_valid_seconds: int = 45
 

@@ -9,7 +9,8 @@ from cvd_engine import Bar
 class TrendDetector:
     """Aggregates 1-minute bars into hourly closes and classifies the regime.
 
-    ``regime()`` returns one of "up", "down", "range" from a linear-regression
+    ``regime()`` returns one of "up", "down", "range", or "none" when there is
+    not enough data yet to classify (no-trade).
     slope (points/hour) over the last ``trend_lookback_hours`` hourly closes.
     """
 
@@ -35,10 +36,10 @@ class TrendDetector:
             closes.append(self._cur_close)
         n = self.cfg.trend_lookback_hours
         if len(closes) < max(3, n):
-            return "range"
+            return "none"
         window = closes[-n:]
         if len(window) < 3:
-            return "range"
+            return "none"
         x = list(range(len(window)))
         slope, _ = linear_regression(x, window)
         if slope > self.cfg.trend_slope_threshold:

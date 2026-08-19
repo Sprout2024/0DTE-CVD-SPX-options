@@ -48,10 +48,22 @@ class Executor:
         self.store = store
         self.positions: Dict[str, Position] = {}
         self._seq = 0
+        self._daily_sl_count = 0
+        self._session_day = None
         self._log = logging.getLogger("executor")
 
     def has_open_position(self) -> bool:
         return any(p.status == "OPEN" for p in self.positions.values())
+
+    def open_count(self) -> int:
+        return sum(1 for p in self.positions.values() if p.status == "OPEN")
+
+    def open_positions(self) -> List[Position]:
+        return [p for p in self.positions.values() if p.status == "OPEN"]
+
+    def _persist(self) -> None:
+        if self.store is not None:
+            self.store.save_positions(self.open_positions())
 
     @staticmethod
     def _snap_tick(price: float) -> float:
@@ -75,14 +87,15 @@ class Executor:
         order.algoParams = [TagValue("adaptivePriority", urgency)]
         return order
 
-    async def _adaptive_fill(self, combo: Contract, side: str, price: float,
+    async def _adaptive_fill(self, combo: Contract, side: str, limit: float,
                              valid_seconds: float, quantity: int, urgency: str) -> Optional[Trade]:
         """Place an IBKR Adaptive Limit order and wait for fill.
 
-        ``urgency`` = "Patient" | "Normal" | "Urgent" (entry=Normal, exit=Urgent).
+        ``limit`` is already a valid tick snapped within the configured
+        interval. ``urgency`` = "Patient" | "Normal" | "Urgent".
         Returns the filled Trade or None on timeout.
         """
-        order = self._adaptive_limit(side, quantity, self._snap_tick(price), urgency)
+        order = self._adaptive_limit(side, quantity, limit, urgency)
         trade = self.ib.placeOrder(combo, order)
         self._log.info("%s %s @ %.2f (adaptive %s)", side, quantity, order.lmtPrice, urgency)
         ok = await self._wait(trade, valid_seconds)
@@ -100,7 +113,13 @@ class Executor:
         if credit is None or credit <= 0:
             self._log.warning("no spread mid available, skip entry")
             return None
-        trade = await self._adaptive_fill(spread.combo, "SELL", credit,
+        bid = self.selector.spread_bid(spread)
+        ask = self.selector.spread_ask(spread)
+        limit = self._limit_for("SELL", bid, ask)
+        if limit is None:
+            self._log.warning("no spread bid/ask available, skip entry")
+            return None
+        trade = await self._adaptive_fill(spread.combo, "SELL", limit,
                                           self.cfg.entry_valid_seconds, spread.quantity, "Normal")
         if trade is None:
             self._log.warning("entry not filled, cancelled")
@@ -120,8 +139,7 @@ class Executor:
             sl_price=round(avg * (1.0 + self.cfg.stop_loss_pct), 2),
         )
         self.positions[pos.id] = pos
-        if self.store is not None:
-            self.store.save_position(pos)
+        self._persist()
         self._log.info(
             "position %s OPEN %s credit=%.2f tp=%.2f sl=%.2f extreme=%.2f",
             pos.id, pos.direction, avg, pos.tp_target, pos.sl_price, signal.extreme,
@@ -132,7 +150,13 @@ class Executor:
         if credit is None or credit <= 0:
             self._log.warning("no iron-condor mid available, skip entry")
             return None
-        trade = await self._adaptive_fill(condor.combo, "SELL", credit,
+        bid = self.selector.iron_condor_bid(condor)
+        ask = self.selector.iron_condor_ask(condor)
+        limit = self._limit_for("SELL", bid, ask)
+        if limit is None:
+            self._log.warning("no iron-condor bid/ask available, skip entry")
+            return None
+        trade = await self._adaptive_fill(condor.combo, "SELL", limit,
                                           self.cfg.entry_valid_seconds, condor.quantity, "Normal")
         if trade is None:
             self._log.warning("iron-condor entry not filled, cancelled")
@@ -153,8 +177,7 @@ class Executor:
             condor=condor,
         )
         self.positions[pos.id] = pos
-        if self.store is not None:
-            self.store.save_position(pos)
+        self._persist()
         self._log.info(
             "position %s IRON-CONDOR OPEN credit=%.2f tp=%.2f sl=%.2f",
             pos.id, avg, pos.tp_target, pos.sl_price,
@@ -253,6 +276,26 @@ class Executor:
             return self.selector.iron_condor_mid(pos.condor)
         return self.selector.spread_mid(pos.spread)
 
+    def _pos_ba(self, pos: Position) -> tuple:
+        """Return (bid, ask) for a spread or iron-condor position."""
+        if pos.condor is not None:
+            return (self.selector.iron_condor_bid(pos.condor),
+                    self.selector.iron_condor_ask(pos.condor))
+        return (self.selector.spread_bid(pos.spread),
+                self.selector.spread_ask(pos.spread))
+
+    @staticmethod
+    def _limit_for(side: str, bid, ask) -> Optional[float]:
+        """Limit price within the configured interval:
+        SELL -> (buy-1, mid) uses the buy-1 price (fill at bid or better);
+        BUY  -> (mid, sell-1) uses the sell-1 price (fill at ask or better).
+        """
+        if bid is None or ask is None:
+            return None
+        if side == "SELL":
+            return round(bid, 2)
+        return round(ask, 2)
+
     async def manage(self, spot: float, last_bar: Optional[Bar]) -> None:
         for pos in list(self.positions.values()):
             if pos.status != "OPEN":
@@ -326,14 +369,12 @@ class Executor:
 
     async def _close(self, pos: Position, kind: str) -> None:
         pos.close_kind = kind
-        if kind in ("SL", "TECH"):
+        bid, ask = self._pos_ba(pos)
+        limit = self._limit_for("BUY", bid, ask)
+        if limit is None:
             await self._market_close(pos)
             return
-        value = self._pos_value(pos)
-        if value is None:
-            await self._market_close(pos)
-            return
-        trade = await self._adaptive_fill(self._combo(pos), "BUY", value,
+        trade = await self._adaptive_fill(self._combo(pos), "BUY", limit,
                                           self.cfg.close_patience_seconds * 4, pos.quantity, "Urgent")
         if trade is None:
             self._log.warning("position %s %s close not filled (adaptive), escalating", pos.id, kind)
@@ -342,9 +383,10 @@ class Executor:
         self._finalize_close(pos, trade)
 
     async def _market_close(self, pos: Position) -> None:
-        value = self._pos_value(pos)
-        if value is not None:
-            order = self._adaptive_limit("BUY", pos.quantity, value, "Urgent")
+        bid, ask = self._pos_ba(pos)
+        limit = self._limit_for("BUY", bid, ask)
+        if limit is not None:
+            order = self._adaptive_limit("BUY", pos.quantity, limit, "Urgent")
             trade = self.ib.placeOrder(self._combo(pos), order)
             self._log.info("position %s close %s @ %.2f (adaptive urgent)", pos.id, pos.close_kind or "MANUAL", order.lmtPrice)
             ok = await self._wait(trade, 8)
@@ -374,9 +416,12 @@ class Executor:
         pos.realized_pnl = (pos.entry_credit - avg) * pos.quantity * 100.0
         pos.status = "CLOSED"
         held = time.time() - pos.entry_time
+        if pos.close_kind == "SL":
+            self._daily_sl_count += 1
         self._log.info(
-            "position %s CLOSED %s credit=%.2f close=%.2f pnl=%.2f held=%.0fs",
+            "position %s CLOSED %s credit=%.2f close=%.2f pnl=%.2f held=%.0fs (daily SL=%d/%d)",
             pos.id, pos.close_kind, pos.entry_credit, avg, pos.realized_pnl, held,
+            self._daily_sl_count, self.cfg.max_daily_sl,
         )
         if pos.condor is not None:
             for t in self.selector.iron_condor_legs(pos.condor):
@@ -384,8 +429,15 @@ class Executor:
         else:
             for t in (pos.spread.short_leg, pos.spread.long_leg):
                 self.ib.cancelMktData(t)
-        if self.store is not None:
-            self.store.clear_position()
+        self._persist()
+
+    def sl_limit_reached(self) -> bool:
+        return self.cfg.max_daily_sl > 0 and self._daily_sl_count >= self.cfg.max_daily_sl
+
+    def update_session_day(self, day) -> None:
+        if self._session_day is not None and day != self._session_day:
+            self._daily_sl_count = 0
+        self._session_day = day
 
     async def _wait(self, trade: Trade, timeout: float) -> bool:
         t0 = time.time()

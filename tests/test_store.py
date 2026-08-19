@@ -45,7 +45,7 @@ def test_store_roundtrip():
             store.append_bar(b)
         store.clear_position()
         restored, pos = store.load(d)
-        assert pos is None
+        assert pos == []
         assert len(restored) == 3, f"expected 3 bars, got {len(restored)}"
         for a, b in zip(bars, restored):
             assert a.ts == b.ts and a.cvd_close == b.cvd_close and a.ticks == b.ticks and a.iv == b.iv
@@ -92,10 +92,10 @@ def test_store_position_roundtrip():
 
         store.save_position(_Pos())
         restored, pos = store.load(d)
-        assert pos is not None
-        assert pos["id"] == "P1" and pos["direction"] == "bull"
-        assert pos["sell_strike"] == 7800.0 and pos["buy_strike"] == 7750.0
-        assert pos["right"] == "P"
+        assert pos != []
+        assert pos[0]["id"] == "P1" and pos[0]["direction"] == "bull"
+        assert pos[0]["sell_strike"] == 7800.0 and pos[0]["buy_strike"] == 7750.0
+        assert pos[0]["right"] == "P"
         print("OK store position roundtrip")
 
 

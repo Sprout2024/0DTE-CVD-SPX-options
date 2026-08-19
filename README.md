@@ -1,42 +1,59 @@
-# 0DTE CVD SPX Options
+# 震荡趋势下的 Iron Condor 0DTE SPY（v2.0）
 
-基于 **CVD（累积成交量差）背离** 的 SPX 0DTE 期权价差日内剥头皮策略。
+基于 **1 分钟窗口趋势判定 + Iron Condor（铁鹰）** 的 SPX 0DTE 期权日内策略。
 
-- 信号源：**ES 期货**（CME）的逐笔成交，按「成交价 vs 买一/卖一」规则累积 CVD
-- 交易标的：**SPX 指数期权**（CBOE，0DTE 周选 SPXW 链）
-- 逻辑：价格创新高/新低但 CVD 未跟随（买/卖动量衰竭）→ 卖方向性信用价差
+- **信号源**：**ES 期货**（CME）逐笔成交，按「成交价 vs 买一/卖一」规则累积 CVD，聚合成 1 分钟 bar
+- **交易标的**：**SPX 指数期权**（CBOE，0DTE 周选 SPXW 链）
+- **核心思想**：只在**震荡趋势（range）**下卖 Iron Condor 收权利金，用 θ 衰减收割；趋势日通过多层过滤回避，不做方向性方向
 
-## 策略逻辑
+> 版本：v2.0.0 ｜ 上一版 v1.0.0 为「CVD 背离信号 + 方向性价差」策略，v2.0 重构为「震荡趋势铁鹰 + 多仓 + 风控过滤」。
 
-1. 将 ES 逐笔成交聚合成 **1 分钟 bar**，同时累积 CVD（`cvd_close`）
-2. 检测 **背离**（`divergence_lookback` 根 bar）作为入场触发：
-   - **空头背离**：价格创新高，但 CVD 显著低于前高对应水平
-   - **多头背离**：价格创新低，但 CVD 显著高于前低对应水平
-3. **小时级趋势门控**（`trend.py`，按最近 4 小时收盘价斜率判 up/down/range）：
-   - **range（震荡）** → 开 **Iron Condor**（铁鹰）：卖 OTM call/put 价差，赌区间
-   - **up / down（趋势）** → **空仓**（历史验证趋势日方向性玩法无正期望）
-4. **Iron Condor 离场**（无时间限制）：
-   - **SL**：净值 ≥ 1.5× 权利金（翅膀被击穿）
-   - **TP**：净值 ≤ 0.30× 权利金（锁 70% 利润）
-   - 16:00 ET 全局强平兜底
-5. 方向性垂直价差仅在 `regime_filter=False` 时启用（保留代码/测试）
+## 策略逻辑（v2.0）
 
-> 历史回测（30 天 ES 数据 + BS 定价器）：震荡日铁鹰（offset 30）净 +$3460；趋势日做方向（卖价差 / 买 Long 期权）均无正期望，故趋势日空仓。
+### 1. 入场触发：1 分钟窗口趋势判定（`regime_min_window`）
+- 取最近 `regime_min_window`（30）根 1 分钟收盘价，线性回归求斜率
+- **|斜率| ≤ `regime_min_slope`（0.15 点/分）→ range（震荡）**，可开仓
+- up / down / 数据不足（none）→ 不开仓
+- 数据不足一律视为 `none`（不交易），避免开盘前 30 分钟无脑入场
+
+### 2. 多层过滤（都通过才开仓）
+| 过滤器 | 参数 | 作用 |
+|---|---|---|
+| 前一天趋势 | `prev_day_trend_filter`（15m 斜率 ≤2.0） | 前一天收盘非震荡 → 次日不开 |
+| 开盘波动 | `open_vol_filter`（开盘 30 分钟波幅 ≤4 点） | 开盘剧烈波动 → 当日不开 |
+| 当日 SL 上限 | `max_daily_sl`（2） | 当日累计 2 笔 SL → 当日停止新开仓 |
+
+- 前一天趋势决策写入 `data/trade_decision.json`（可用 `trade_decision.py` 生成），策略直接读取；缺失则自动生成
+
+### 3. Iron Condor 入场
+- 以当前 SPX 指数价 `spot` 为锚：卖 `spot±offset(30)`，买 `spot±(offset+wing=55)`
+- 每笔 1 手（`contracts=1`），权利金须在 `[1.00, 30.00]`
+- **多仓**：`max_position=5`，每笔入场后 `cooldown_seconds`（600s=10分钟）才可再开，直到满仓
+- 入场用 **IBKR Adaptive Limit**（SELL 限价锚定「买一价」，区间 `(买一, mid)`）
+
+### 4. 离场（每仓独立管理）
+- **TP**：净值 ≤ 0.30× 权利金（锁 70% 利润）
+- **SL**：净值 ≥ 1.50× 权利金（翅膀被击穿）
+- **EOD**：16:00 ET 全局强平兜底
+- 平仓用 **IBKR Adaptive Limit**（BUY 限价锚定「卖一价」，区间 `(mid, 卖一)`）；SL/TECH 也走 Adaptive urgent，超时升级市价单
 
 ## 目录结构
 
 ```
 ├── main.py                # 实盘/纸面交易入口
-├── strategy.py            # 策略主循环（信号→开仓→管理→重连→恢复）
-├── cvd_engine.py          # 1 分钟 bar 构建 + CVD 背离检测
-├── options.py             # SPX 期权链选择、价差构建与定价
-├── executor.py            # 下单 / 持仓管理 / 机械离场
+├── strategy.py            # 策略主循环（range判定→开仓→管理→重连→恢复）
+├── cvd_engine.py          # 1 分钟 bar 构建 + CVD 计算
+├── options.py             # SPX 期权链选择、铁鹰构建与定价
+├── executor.py            # 下单 / 多仓管理 / 机械离场 / Adaptive 限价
 ├── contracts.py           # 信号合约解析（ES 期货前月）
-├── state_store.py         # CVD bar 与持仓状态持久化（JSONL）
+├── state_store.py         # CVD bar 与多持仓状态持久化（JSONL）
+├── trend.py               # 趋势判定（小时级）
 ├── hist_data.py           # IBKR 历史 tick/bar 拉取
 ├── backtest.py            # 回测引擎 + BS 期权定价器
-├── run_backtest.py        # 回测 CLI
-├── analyze_divergence.py  # 多天背离信号统计
+├── run_backtest.py        # 回测 CLI（单仓）
+├── run_spy_year.py        # 一年期多仓回测 CLI（含 cooldown / SL限制 / 双过滤）
+├── fetch_spy_history.py   # SPY 历史数据拉取
+├── trade_decision.py      # 生成当日是否开仓决策文件
 ├── logger.py              # 日志配置
 ├── config.py              # 集中配置
 └── tests/                 # 单元 / mock 测试
@@ -60,74 +77,85 @@ python -m venv .venv
 ```
 
 - `--market-data-type 1` = 实时（需已订阅 `US Securities Snapshot and Futures Value Bundle`）
-- `--state-file data/cvd_state.jsonl` 状态持久化文件（重启/断线后恢复 CVD 与持仓）
-- `--signals-file data/signals.jsonl` 检测到的信号日志（含趋势类型/时间/方向）
-- 运行中 `kill <pid>`（SIGTERM）会优雅平仓退出；断线自动重连
+- `--state-file data/cvd_state.jsonl` 状态持久化（重启/断线后恢复 CVD 与多持仓）
+- 运行中 `kill <pid>`（SIGTERM）优雅平仓退出；断线自动重连
 
-### 回测
+### 生成当日是否开仓决策（前一天趋势过滤）
 
 ```bash
-# 默认开启趋势门控（range→Iron Condor，趋势日→空仓），与实盘一致
-.venv/bin/python run_backtest.py --days 3 --data bar --cache bt.pkl
-
-# 关闭趋势门控（恢复方向性垂直价差）
-.venv/bin/python run_backtest.py --days 3 --data tick --cache bt.pkl --no-regime-filter
-
-# hybrid 模式（bar 代理 + 极值分钟精确 tick）
-.venv/bin/python run_backtest.py --days 3 --data hybrid --cache bt.pkl
-
-# 离线回放缓存
-.venv/bin/python run_backtest.py --offline --cache bt.pkl
+.venv/bin/python trade_decision.py              # 默认判断今天（用昨天数据）
+.venv/bin/python trade_decision.py --date 2026-08-19
 ```
 
-> 默认 `regime_filter` 开启：震荡日开铁鹰、趋势日空仓（与 `strategy.py` 一致）；加 `--no-regime-filter` 回退到方向性价差。
+输出 `data/trade_decision.json`（保留最近 10 个交易日记录）：
+```json
+{ "trade_day": "2026-08-19", "decision": "open"|"skip", "prev_day_15m_slope": 0.82 }
+```
 
-### 多天信号统计
+### 一年期多仓回测
 
 ```bash
-.venv/bin/python analyze_divergence.py --days 6 --port 4002
+.venv/bin/python fetch_spy_history.py --start 2025-08-01 --end 2026-08-17 --cache data/spy_1y.pkl
+.venv/bin/python run_spy_year.py --cache data/spy_1y.pkl --detail
 ```
 
 ### 测试
 
 ```bash
+.venv/bin/python tests/test_trend.py
 .venv/bin/python tests/test_backtest.py
 .venv/bin/python tests/test_flow.py
 .venv/bin/python tests/test_store.py
-.venv/bin/python tests/test_strategy.py
 ```
 
-## 关键配置（`config.py`）
+## 关键配置（`config.py`，v2.0 默认）
 
 | 参数 | 默认 | 说明 |
 |------|------|------|
-| `symbol` / `signal_sec_type` / `signal_exchange` | ES / FUT / CME | 信号合约 |
-| `option_symbol` / `option_sec_type` / `option_exchange` | SPX / IND / CBOE | 期权标的 |
-| `bar_seconds` | 60 | bar 周期 |
-| `divergence_lookback` | 10 | 背离回看 bar 数 |
-| `min_price_move` / `min_cvd_gap` | 0.05 / 1.0 | 背离触发阈值 |
-| `spread_width` | 50 | 价差宽度 |
-| `strike_band` / `target_delta` | 120 / 0.30 | 行权价选择 |
-| `min/max_entry_credit` | 1.00 / 30.00 | 权利金范围 |
-| `take_profit_pct` / `stop_loss_pct` | 0.30 / 1.00 | 止盈止损 |
-| `profit_time_seconds` / `hard_time_seconds` | 300 / 600 | 时间离场 |
-| `contracts` | 1 | 手数 |
+| `symbol` / `signal_sec_type` | ES / FUT | 信号合约（CVD） |
+| `option_symbol` / `option_exchange` | SPX / CBOE | 期权标的 |
+| `regime_min_window` | 30 | 1 分钟窗口趋势判定 bar 数 |
+| `regime_min_slope` | 0.15 | range 判定斜率阈值（点/分） |
+| `open_vol_filter` | 4.0 | 开盘 30 分钟波幅过滤（点） |
+| `open_vol_window_minutes` | 30 | 开盘波动窗口 |
+| `prev_day_trend_filter` | 2.0 | 前一天 15m 斜率过滤（点/15min） |
+| `prev_day_trend_window_minutes` | 120 | 前一天收盘段窗口 |
+| `iron_condor_offset` | 30.0 | 铁鹰短腿偏移 |
+| `iron_condor_wing` | 25.0 | 铁鹰翼宽 |
+| `iron_condor_take_profit_pct` | 0.70 | TP（锁 70% 权利金） |
+| `iron_condor_stop_loss_pct` | 0.50 | SL（净值 1.5× 权利金） |
+| `max_position` | 5 | 最大并发持仓 |
+| `cooldown_seconds` | 600 | 每笔入场后 cooldown（10 分钟） |
+| `max_daily_sl` | 2 | 当日 SL 上限，达 2 笔停止新开仓 |
+| `contracts` | 1 | 每笔手数 |
 
 ## 实盘注意事项
 
 - **SPX 期权最小报价单位**：权利金 ≥ \$3 为 0.05，< \$3 为 0.10，入场/离场限价已按此取整（`Executor._snap_tick`）
-- **Riskless combination 拒绝**：IBKR 可能把信用价差组合单判为「riskless combination」拒绝（Error 201）。已用 `order.advancedErrorOverride="COMBOPAYOUT"`（Transmit anyway）绕过
-- **指数期权链**：`reqSecDefOptParamsAsync` 的 `futFopExchange` 需传空串，0DTE 优先选周选 SPXW 链
+- **Riskless combination 拒绝**：IBKR 可能把信用价差组合单判为 riskless combination 拒绝（Error 201），用 `advancedErrorOverride="COMBOPAYOUT"` 绕过
+- **指数期权链**：`reqSecDefOptParamsAsync` 的 `futFopExchange` 传空串，0DTE 优先周选 SPXW 链
 - **数据订阅**：实时行情需 `US Securities Snapshot and Futures Value Bundle`（NP,L1）
+- **资金**：满仓 5 个铁鹰峰值保证金约 $12,500（翼宽 25 × $100），建议账户 $20,000+
 
 ## 状态持久化
 
 数据文件统一存于 `data/`（已 gitignore）：
 
-- **`data/cvd_state.jsonl`**（`--state-file`）逐行记录：
-  - `{"k":"bar",...}` 每分钟已完成 bar（含 CVD 累计值 + **`iv`**（年化已实现波动率代理））
-  - `{"k":"pos",...}` / `{"k":"pos_done"}` 开仓 / 平仓
-- **`data/signals.jsonl`**（`--signals-file`）逐行记录每个检测到的信号：
-  - `{"ts","direction"(bull/bear),"regime"(up/down/range),"extreme","cvd_extreme"}`
+- **`data/cvd_state.jsonl`**（`--state-file`）：每分钟 bar（含 CVD）+ 多持仓快照（`pos_snapshot`），重启后恢复
+- **`data/trade_decision.json`**：当日是否开仓决策（前一天趋势过滤）
+- **`data/signals.jsonl`**：检测到的 CVD 信号日志（分析用，不驱动入场）
 
-重启 / 断线重连时回放当日 bar 重建 CVD，并从 IBKR 同步未跟踪持仓（孤儿持仓自动市价平掉）。
+## 回测表现（v2.0，2025-08 至 2026-08，262 交易日）
+
+| 指标 | 数值 |
+|---|---|
+| 参与日 | 143 |
+| 总笔数 | 973（平均 6.8 笔/日） |
+| 胜率 | 85% |
+| 净盈亏 | +$289,624 |
+| 平均/笔 | +$298 |
+| 最大回撤（逐笔） | -$5,540 |
+| 最大连续亏损 | 11 笔 |
+| 峰值资金占用 | $12,500（满仓 5） |
+
+> 回测基于 SPY 1 分钟数据（×10 映射到 SPX）+ BS 定价器，为名义盈亏（每笔 1 手）。单仓策略（v2.0 前）为 80% 胜率 / +$53,867。
