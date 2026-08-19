@@ -50,7 +50,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--host", default="127.0.0.1", help="TWS / IB Gateway host")
     p.add_argument("--port", type=int, default=7497, help="paper=7497, live=7496")
     p.add_argument("--client-id", type=int, default=31, help="unique client id for the API (main.py 已用 30)")
-    p.add_argument("--account", default="U18853178", help="IBKR account id to flatten (empty = default)")
+    p.add_argument("--account", default="DUR888412", help="IBKR account id to flatten (empty = default)")
     p.add_argument("--symbol", default="SPX", help="option symbol to flatten (unless --all is given)")
     p.add_argument("--all", action="store_true", help="flatten EVERY option position on the account")
     p.add_argument("--dry-run", action="store_true", help="no flag file, no orders -- only report")

@@ -11,7 +11,7 @@ class Config:
     host: str = "127.0.0.1"
     port: int = 7497
     client_id: int = 30
-    account: str = "U18853178"  # IBKR account id to trade; empty = default
+    account: str = "DUR888412"  # IBKR account id to trade; empty = default
     dry_run: bool = False  # True = observe only, never place real orders
     symbol: str = "ES"
     signal_sec_type: str = "FUT"
