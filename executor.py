@@ -152,7 +152,7 @@ class Executor:
             self._log.warning("no spread bid/ask available, skip entry")
             return None
         trade = await self._adaptive_fill(spread.combo, "SELL", limit,
-                                          self.cfg.entry_valid_seconds, spread.quantity, "Normal")
+                                          self.cfg.entry_valid_seconds, spread.quantity, "Urgent")
         if trade is None:
             self._log.warning("entry not filled, cancelled")
             return None
@@ -192,7 +192,7 @@ class Executor:
             self._log.warning("no iron-condor bid/ask available, skip entry")
             return None
         trade = await self._adaptive_fill(condor.combo, "SELL", limit,
-                                          self.cfg.entry_valid_seconds, condor.quantity, "Normal")
+                                          self.cfg.entry_valid_seconds, condor.quantity, "Urgent")
         if trade is None:
             self._log.warning("iron-condor entry not filled, cancelled")
             return None
