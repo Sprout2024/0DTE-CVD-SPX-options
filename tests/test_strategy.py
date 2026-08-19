@@ -17,6 +17,25 @@ from tests.mock_ib import MockIB
 ET = ZoneInfo("America/New_York")
 
 
+def test_patch_ib_on_error():
+    from ib_insync import IB
+    from strategy import _patch_ib_on_error
+
+    _patch_ib_on_error()
+    patched = IB._onError
+    resubscribed = []
+
+    class FakeIB:
+        async def reqAccountSummaryAsync(self):
+            resubscribed.append(True)
+
+    fake = FakeIB()
+    patched(fake, -1, 1102, "Connectivity restored", None)
+    assert not resubscribed, "1102 must NOT auto-resubscribe account summary"
+    patched(fake, -1, 999, "some other error", None)
+    print("OK patch: 1102 does not auto-resubscribe account summary")
+
+
 def make_strategy(cfg):
     ib = MockIB(spot=592.0)
     setup_logging(cfg)
@@ -207,6 +226,7 @@ async def test_regime_gate():
 
 
 async def main():
+    test_patch_ib_on_error()
     await test_full_strategy()
     await test_no_trade_windows()
     await test_regime_gate()

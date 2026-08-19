@@ -19,6 +19,30 @@ from options import OptionSelector
 from state_store import CvdStore
 from trend import TrendDetector
 
+_IB_ON_ERROR_PATCHED = False
+
+
+def _patch_ib_on_error() -> None:
+    """ib_insync auto-resubscribes account summary on error 1102 (reconnect);
+    each reconnect stacks a new subscription and IB rejects it with
+    Error 322 (max account summary requests exceeded). We never use account
+    summary, so suppress the auto-resubscribe."""
+    global _IB_ON_ERROR_PATCHED
+    if _IB_ON_ERROR_PATCHED:
+        return
+    orig = IB._onError
+
+    def patched(self, reqId, errorCode, errorString, contract):
+        if errorCode == 1102:
+            return
+        return orig(self, reqId, errorCode, errorString, contract)
+
+    IB._onError = patched
+    _IB_ON_ERROR_PATCHED = True
+
+
+_patch_ib_on_error()
+
 EASTERN = None
 
 
