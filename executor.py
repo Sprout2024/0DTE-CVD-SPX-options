@@ -85,6 +85,10 @@ class Executor:
         order.advancedErrorOverride = "COMBOPAYOUT"
         order.algoStrategy = "Adaptive"
         order.algoParams = [TagValue("adaptivePriority", urgency)]
+        # Mark the option combo as guaranteed (riskless) so it routes to the
+        # options exchange and can be crossed; without this a SPX/SPXW BAG
+        # order can stay in PreSubmitted forever and never fill.
+        order.smartComboRoutingParams = [TagValue("NonGuaranteed", "0")]
         if self.cfg.account:
             order.account = self.cfg.account
         return order
@@ -447,6 +451,7 @@ class Executor:
         order = MarketOrder("BUY", pos.quantity)
         order.tif = "DAY"
         order.advancedErrorOverride = "COMBOPAYOUT"
+        order.smartComboRoutingParams = [TagValue("NonGuaranteed", "0")]
         if self.cfg.account:
             order.account = self.cfg.account
         trade = self.ib.placeOrder(self._combo(pos), order)
