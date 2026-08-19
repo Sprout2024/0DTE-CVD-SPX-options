@@ -6,10 +6,13 @@ import time
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Dict, List, Optional
+from zoneinfo import ZoneInfo
 
 from ib_insync import ComboLeg, Contract, IB, Option, Stock, Ticker
 
 from config import Config
+
+_ET = ZoneInfo("America/New_York")
 
 
 @dataclass
@@ -67,7 +70,7 @@ class OptionSelector:
         For index options the weekly (e.g. SPXW) and monthly (e.g. SPX) chains
         are returned separately; the 0DTE trade needs the weekly one.
         """
-        today = datetime.now().date()
+        today = datetime.now(_ET).date()
         best = None
         best_exp = None
         for ch in chains:
@@ -85,7 +88,9 @@ class OptionSelector:
         return best
 
     def _pick_expiry(self) -> Optional[str]:
-        today = datetime.now().date()
+        # Use US Eastern date so we pick today's 0DTE expiry even when the local
+        # clock (e.g. UTC+8) is already past midnight but ET is still yesterday.
+        today = datetime.now(_ET).date()
         exps = sorted(
             (datetime.strptime(e, "%Y%m%d").date(), e)
             for e in self.chain.expirations
