@@ -124,6 +124,14 @@ class Strategy:
             return self._last_spot
         return self._last_spot * self.cfg.spot_scale
 
+    def _tick_in_rth(self, ts) -> bool:
+        """True if the tick's timestamp falls inside US RTH (09:30-16:00 ET)."""
+        if ts is None:
+            return True
+        if ts.tzinfo is not None:
+            ts = ts.astimezone(_eastern())
+        return self.in_trading_hours(ts)
+
     def _feed_signal(self, ticker: Ticker) -> None:
         for tick in ticker.ticks:
             if tick.tickType == 1:
@@ -132,6 +140,8 @@ class Strategy:
                 self._ask = tick.price
         for tick in ticker.ticks:
             if tick.tickType == 4 and tick.size > 0:
+                if not self._tick_in_rth(tick.time):
+                    continue
                 price = float(tick.price)
                 size = float(tick.size)
                 bid, ask = self._bid, self._ask

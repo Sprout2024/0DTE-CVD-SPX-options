@@ -210,7 +210,39 @@ async def main():
     await test_full_strategy()
     await test_no_trade_windows()
     await test_regime_gate()
+    await test_rth_gate()
     print("FULL STRATEGY MOCK TEST PASSED")
+
+
+async def test_rth_gate():
+    """Outside 09:30-16:00 ET ticks must NOT build/record CVD bars."""
+    with TemporaryDirectory() as tmp:
+        cfg = Config(
+            divergence_lookback=3, min_ticks_per_bar=1,
+            option_symbol="SPY", option_sec_type="STK",
+            spread_width=5.0, strike_band=12.0,
+            regime_filter=False, cooldown_seconds=0,
+            log_level="INFO", log_file="", signals_file="",
+            state_file=str(Path(tmp) / "state.jsonl"),
+        )
+        ib = MockIB(spot=592.0)
+        strat = Strategy(ib, cfg)
+        strat.entry_allowed = lambda: True
+        await strat.setup()
+        ticker = strat.spot_ticker
+        today = datetime.now(ZoneInfo("America/New_York")).date()
+
+        # feed an out-of-hours tick (08:00 ET) -> no processing
+        emit_trade(ib, ticker, 590.0, 100, 1, datetime(today.year, today.month, today.day, 8, 0, 0))
+        await asyncio.sleep(0.2)
+        assert strat._last_spot is None, f"out-of-hours should not update spot, got {strat._last_spot}"
+        print("OK RTH gate: 08:00 tick ignored")
+
+        # feed an in-hours tick (10:00 ET) -> processed
+        emit_trade(ib, ticker, 591.0, 100, 1, datetime(today.year, today.month, today.day, 10, 0, 0))
+        await asyncio.sleep(0.2)
+        assert strat._last_spot == 591.0, f"in-hours should update spot, got {strat._last_spot}"
+        print("OK RTH gate: 10:00 tick processed")
 
 
 if __name__ == "__main__":
