@@ -79,13 +79,18 @@ class OptionSelector:
         """Prefer the chain that offers the earliest expiry (0DTE weekly).
 
         For index options the weekly (e.g. SPXW) and monthly (e.g. SPX) chains
-        are returned separately; the 0DTE trade needs the weekly one.
+        are returned separately; the 0DTE trade needs the weekly one. When both
+        share the same earliest expiry (they often both list today's 0DTE
+        date), prefer the weekly chain (tradingClass == symbol + 'W', e.g.
+        SPXW) so 0DTE legs resolve to SPXW and not the SPX monthly.
         """
         today = datetime.now(_ET).date()
+        base = self.cfg.option_symbol
         best = None
-        best_exp = None
+        best_key = None
         for ch in chains:
-            if not ch.tradingClass.startswith(self.cfg.option_symbol):
+            tc = getattr(ch, "tradingClass", "") or ""
+            if not tc.startswith(base):
                 continue
             try:
                 exps = sorted(datetime.strptime(e, "%Y%m%d").date() for e in ch.expirations)
@@ -94,8 +99,10 @@ class OptionSelector:
             future = [d for d in exps if d >= today]
             if not future:
                 continue
-            if best is None or future[0] < best_exp:
-                best, best_exp = ch, future[0]
+            weekly = (tc == base + "W")
+            key = (future[0], 0 if weekly else 1)
+            if best_key is None or key < best_key:
+                best, best_key = ch, key
         return best
 
     def _pick_expiry(self) -> Optional[str]:
