@@ -48,12 +48,14 @@ class OptionSelector:
         self.cfg = cfg
         self.chain = None
         self.expiry: Optional[str] = None
+        self._trading_class: Optional[str] = None
         self._live_tickers: Dict[int, Ticker] = {}
 
     def reset(self) -> None:
         self._live_tickers.clear()
         self.chain = None
         self.expiry = None
+        self._trading_class = None
 
     async def init(self, underlying: Contract) -> None:
         sec_type = getattr(underlying, "secType", None) or "STK"
@@ -63,6 +65,15 @@ class OptionSelector:
         self.chain = self._best_chain(chains)
         if self.chain is None:
             raise RuntimeError(f"option chain for {self.cfg.option_symbol} not found")
+        self._trading_class = getattr(self.chain, "tradingClass", None) or None
+
+    def _mk_option(self, expiry: str, strike: float, right: str) -> Option:
+        """Build an option contract with the selected chain's tradingClass so
+        IBKR can disambiguate e.g. SPXW (weekly 0DTE) from SPX (monthly)."""
+        opt = Option(self.cfg.option_symbol, expiry, strike, right, self.cfg.exchange)
+        if self._trading_class:
+            opt.tradingClass = self._trading_class
+        return opt
 
     def _best_chain(self, chains) -> Optional[OptionChain]:
         """Prefer the chain that offers the earliest expiry (0DTE weekly).
@@ -111,7 +122,7 @@ class OptionSelector:
         if not strikes:
             return None
 
-        opts = [Option(self.cfg.option_symbol, expiry, s, right, self.cfg.exchange) for s in strikes]
+        opts = [self._mk_option(expiry, s, right) for s in strikes]
         await self.ib.qualifyContractsAsync(*opts)
         tickers = await self._snapshot_greeks(opts)
         delta_by_strike: Dict[float, float] = {}
@@ -132,7 +143,7 @@ class OptionSelector:
             return None
 
         short_opt = next(o for o in opts if o.strike == sell_strike)
-        long_opt = Option(self.cfg.option_symbol, expiry, long_strike, right, self.cfg.exchange)
+        long_opt = self._mk_option(expiry, long_strike, right)
         await self.ib.qualifyContractsAsync(long_opt)
         await self._subscribe_legs(short_opt, long_opt)
 
@@ -256,10 +267,10 @@ class OptionSelector:
         if not all((sc_k, lc_k, sp_k, lp_k)) or sc_k == lc_k or sp_k == lp_k:
             return None
         ex = self.cfg.exchange
-        sc = Option(self.cfg.option_symbol, expiry, sc_k, "C", ex)
-        lc = Option(self.cfg.option_symbol, expiry, lc_k, "C", ex)
-        sp = Option(self.cfg.option_symbol, expiry, sp_k, "P", ex)
-        lp = Option(self.cfg.option_symbol, expiry, lp_k, "P", ex)
+        sc = self._mk_option(expiry, sc_k, "C")
+        lc = self._mk_option(expiry, lc_k, "C")
+        sp = self._mk_option(expiry, sp_k, "P")
+        lp = self._mk_option(expiry, lp_k, "P")
         await self.ib.qualifyContractsAsync(sc, lc, sp, lp)
         if not all((sc.conId, lc.conId, sp.conId, lp.conId)):
             return None
