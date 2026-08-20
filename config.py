@@ -41,6 +41,9 @@ class Config:
     # open-30min volatility filter (points): skip the day if first 30 min range exceeds this
     open_vol_filter: float = 4.0  # 0 = disabled
     open_vol_window_minutes: int = 30
+    # VIX cap for entries: only open iron condors when VIX (30d implied vol) is
+    # below this level. Backtest: VIX<15 => 70% win / +$69/day vs VIX>=15 losing.
+    vix_max: float = 15.0  # 0 = disabled
     # SPX/SPY ratio used to normalize the signal range into SPY-equivalent points
     # for the open-vol filter. Signal ES/SPX (~10x SPY) => 10.0; signal SPY => 1.0.
     open_vol_scale: float = 10.0
@@ -62,7 +65,7 @@ class Config:
     session_end: time = time(16, 0)
     no_trade_first_minutes: int = 15
     no_trade_last_minutes: int = 30
-    max_position: int = 3
+    max_position: int = 1
     cooldown_seconds: int = 600
     max_daily_sl: int = 2
     min_signal_spacing: float = 0.30

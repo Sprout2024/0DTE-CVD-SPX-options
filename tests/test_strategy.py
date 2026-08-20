@@ -105,6 +105,7 @@ async def test_full_strategy():
             stop_loss_pct=1.00,
             mid_offset=0.02,
             regime_filter=False,
+            vix_max=0,
             log_level="INFO",
             log_file="",
             state_file=str(Path(tmp) / "state.jsonl"),

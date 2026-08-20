@@ -111,7 +111,7 @@ async def test_strategy_day_stop():
             iron_condor_offset=2, iron_condor_wing=5,
             min_entry_credit=0.10, max_entry_credit=3.00,
             cooldown_seconds=0, regime_filter=False,
-            prev_day_trend_filter=0, open_vol_filter=0,
+            prev_day_trend_filter=0, open_vol_filter=0, vix_max=0,
             log_level="INFO", log_file="", signals_file="",
             state_file=state_file, day_stop_file=day_stop_file,
         )
@@ -150,7 +150,7 @@ async def test_restore_after_day_stop():
             iron_condor_offset=2, iron_condor_wing=5,
             min_entry_credit=0.10, max_entry_credit=3.00,
             cooldown_seconds=0, regime_filter=False,
-            prev_day_trend_filter=0, open_vol_filter=0,
+            prev_day_trend_filter=0, open_vol_filter=0, vix_max=0,
             log_level="INFO", log_file="", signals_file="",
             state_file=state_file, day_stop_file=day_stop_file,
         )

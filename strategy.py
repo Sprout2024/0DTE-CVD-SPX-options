@@ -67,6 +67,9 @@ class Strategy:
         self.option_underlying: Optional[Contract] = None
         self.spot_ticker: Optional[Ticker] = None
         self.index_ticker: Optional[Ticker] = None
+        self.vix_contract: Optional[Contract] = None
+        self.vix_ticker: Optional[Ticker] = None
+        self._vix: Optional[float] = None
         self._bid: Optional[float] = None
         self._ask: Optional[float] = None
         self._last_spot: Optional[float] = None
@@ -102,6 +105,12 @@ class Strategy:
         self.ib.pendingTickersEvent += self._on_pending_tickers
         self.spot_ticker = self.ib.reqMktData(self.signal, "", False, False)
         self.index_ticker = self.ib.reqMktData(self.option_underlying, "", False, False)
+        if self.cfg.vix_max > 0:
+            self.vix_contract = Contract(
+                symbol="VIX", secType="IND", exchange="CBOE", currency="USD"
+            )
+            await self.ib.qualifyContractsAsync(self.vix_contract)
+            self.vix_ticker = self.ib.reqMktData(self.vix_contract, "", False, False)
         await self.selector.init(self.option_underlying)
 
         t0 = time.time()
@@ -124,7 +133,30 @@ class Strategy:
                 self._feed_signal(t)
             if self.option_underlying is not self.signal and t.contract == self.option_underlying:
                 self._feed_index(t)
+            if self.vix_contract is not None and t.contract == self.vix_contract:
+                self._feed_vix(t)
             self.selector.on_ticker(t)
+
+    def _feed_vix(self, ticker: Ticker) -> None:
+        last = getattr(ticker, "last", float("nan"))
+        bid = getattr(ticker, "bid", float("nan"))
+        ask = getattr(ticker, "ask", float("nan"))
+        for tick in getattr(ticker, "ticks", []):
+            if tick.tickType == 4 and not math.isnan(tick.price):
+                last = tick.price
+        if not math.isnan(last) and last > 0:
+            self._vix = float(last)
+        elif not math.isnan(bid) and not math.isnan(ask) and bid > 0 and ask > 0:
+            self._vix = (bid + ask) / 2.0
+
+    def _vix_allows(self) -> bool:
+        """Only allow iron-condor entries when VIX is below the configured cap."""
+        thresh = self.cfg.vix_max
+        if thresh <= 0:
+            return True
+        if self._vix is None:
+            return False  # no VIX quote yet: hold off
+        return self._vix <= thresh
 
     def _feed_index(self, ticker: Ticker) -> None:
         bid = getattr(ticker, "bid", float("nan"))
@@ -220,6 +252,9 @@ class Strategy:
             return
         if not self.prev_day_trend_allows():
             self._log.info("entry skipped (prior-day trend filter)")
+            return
+        if not self._vix_allows():
+            self._log.info("entry skipped (VIX filter: %.2f > %.1f)", self._vix, self.cfg.vix_max)
             return
         if not self._cooldown_elapsed():
             return

@@ -28,10 +28,30 @@ ET = ZoneInfo("America/New_York")
 SE = dtime(16, 0)
 START = dtime(9, 30)
 COST = 6.40
-IV = 0.246
-MIN_CREDIT = 1.00
+IV = 0.246  # fallback flat IV (only used when VIX history is unavailable)
+VIX_COEF = 1.0  # scale factor applied to VIX (30d IV) to approximate 0DTE IV
+VIX_FILE = "data/vix_history.pkl"
+MIN_CREDIT = 0.50
 MAX_CREDIT = 30.00
 SPOT_SCALE = 10.0
+
+_VIX_MAP = {}
+try:
+    with open(VIX_FILE, "rb") as f:
+        _VIX_MAP = pickle.load(f)
+except (OSError, EOFError):
+    _VIX_MAP = {}
+
+
+def iv_for(ts) -> float:
+    """Return the daily IV (as a Black-Scholes fraction) for the given bar
+    timestamp, derived from the real VIX history (VIX_COEF * VIX/100). Falls
+    back to the flat ``IV`` when no VIX value is available for that day."""
+    day = ts.date().isoformat()
+    vix = _VIX_MAP.get(day)
+    if vix is None:
+        return IV
+    return round(vix * VIX_COEF / 100.0, 4)
 
 _CFG = Config()
 WINDOW = _CFG.regime_min_window
@@ -72,7 +92,7 @@ def condor_value(pricer, spot, ts, sc, lc, sp, lp) -> float:
 def _build_pos(entry_ts, spot):
     """Build a condor position dict at (entry_ts, spot). Returns None if the
     credit is outside the acceptable range."""
-    pricer = OptionPricer(iv=IV)
+    pricer = OptionPricer(iv=iv_for(entry_ts))
     sc = snap5(spot + OFFSET)
     lc = snap5(spot + OFFSET + WING)
     sp = snap5(spot - OFFSET)
@@ -94,7 +114,7 @@ def _manage_exits(bar, open_pos, trades, sl_counter):
     """Check TP/SL exits for all open positions on ``bar``. Returns True if any
     position exited (so the caller re-checks remaining positions on the same bar).
     ``sl_counter`` is a list [n] used to accumulate the day's SL count."""
-    pricer = OptionPricer(iv=IV)
+    pricer = OptionPricer(iv=iv_for(bar.ts))
     any_exit = False
     for pos in list(open_pos):
         val = condor_value(pricer, bar.close, bar.ts, pos["sc"], pos["lc"], pos["sp"], pos["lp"])
@@ -124,7 +144,6 @@ def run_day(raw):
     open_pos = []
     trades = []
     last_entry_ts = None
-    pricer = OptionPricer(iv=IV)
     sl_counter = [0]
 
     for i, b in enumerate(bars):
@@ -154,8 +173,9 @@ def run_day(raw):
     last = [x for x in bars if x.ts.time() <= SE]
     if last:
         eod_bar = last[-1]
+        eod_pricer = OptionPricer(iv=iv_for(eod_bar.ts))
         for pos in list(open_pos):
-            val = condor_value(pricer, eod_bar.close, eod_bar.ts, pos["sc"], pos["lc"], pos["sp"], pos["lp"])
+            val = condor_value(eod_pricer, eod_bar.close, eod_bar.ts, pos["sc"], pos["lc"], pos["sp"], pos["lp"])
             pnl = round((pos["credit"] - val) * 100 - COST, 2)
             trades.append({"kind": "EOD", "credit": pos["credit"], "exit": eod_bar.ts,
                            "exit_v": val,
