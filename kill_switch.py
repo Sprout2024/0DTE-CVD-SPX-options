@@ -28,7 +28,7 @@ import logging
 import math
 import os
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import List, Optional, Tuple
 from zoneinfo import ZoneInfo
 
@@ -68,7 +68,7 @@ def write_day_stop(path: str, day: str, note: str = "manual kill switch") -> str
         os.makedirs(parent, exist_ok=True)
     rec = {
         "day": day,
-        "ts": datetime.now().astimezone(_ET).isoformat(),
+        "ts": datetime.now(timezone.utc).isoformat(),
         "note": note,
     }
     with open(path, "w") as f:

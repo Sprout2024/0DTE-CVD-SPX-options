@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import os
 import time
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from typing import Dict, List, Optional, Tuple
 from zoneinfo import ZoneInfo
 
@@ -105,7 +105,7 @@ class CvdStore:
         rec = {
             "event": "open",
             "id": pos.id,
-            "time": datetime.now(_ET).isoformat(),
+            "time": datetime.now(timezone.utc).isoformat(),
             "type": "iron_condor" if pos.condor is not None else "spread",
             "direction": pos.direction,
             "quantity": pos.quantity,
@@ -124,7 +124,7 @@ class CvdStore:
         rec = {
             "event": "close",
             "id": pos.id,
-            "time": datetime.now(_ET).isoformat(),
+            "time": datetime.now(timezone.utc).isoformat(),
             "kind": pos.close_kind,
             "entry_credit": pos.entry_credit,
             "close_price": pos.close_price,

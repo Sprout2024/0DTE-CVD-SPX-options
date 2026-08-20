@@ -5,7 +5,7 @@ import logging
 import math
 import os
 import time
-from datetime import datetime, time as dtime
+from datetime import datetime, time as dtime, timezone
 from typing import List, Optional
 from zoneinfo import ZoneInfo
 
@@ -214,7 +214,12 @@ class Strategy:
                 self._last_spot = price
                 if not self._tick_in_rth(tick.time):
                     continue
-                bar = self.engine.add_trade(price, size, delta, tick.time)
+                # Normalize the trade timestamp to UTC (matching the IBKR API
+                # clock) so bars, state files and logs all use one timezone.
+                ts = tick.time
+                if ts is not None and ts.tzinfo is not None:
+                    ts = ts.astimezone(timezone.utc)
+                bar = self.engine.add_trade(price, size, delta, ts)
                 if bar is not None:
                     bar.iv = round(self.engine.realized_iv(), 4)
                     self._on_new_bar(bar)  # updates trend + sets bar.regime_30m
