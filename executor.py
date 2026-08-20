@@ -326,16 +326,22 @@ class Executor:
         return (self.selector.spread_bid(pos.spread),
                 self.selector.spread_ask(pos.spread))
 
-    @staticmethod
-    def _limit_for(side: str, bid, ask) -> Optional[float]:
+    def _limit_for(self, side: str, bid, ask) -> Optional[float]:
         """Limit price within the configured interval:
-        SELL -> (buy-1, mid) uses the buy-1 price (fill at bid or better);
-        BUY  -> (mid, sell-1) uses the sell-1 price (fill at ask or better).
+        SELL -> (bid, mid]: price ``mid_offset`` below mid so the Adaptive
+        algo seeks fills between the bid and mid (better fill chance for an
+        0DTE combo), floored at the bid so we never cross the spread.
+        BUY  -> ask (fill at ask or better; a buy at the ask is immediately
+        executable).
         """
         if bid is None or ask is None:
             return None
         if side == "SELL":
-            return round(bid, 2)
+            mid = (bid + ask) / 2.0
+            target = mid - self.cfg.mid_offset
+            if target < bid:
+                target = bid
+            return round(Executor._snap_tick(target), 2)
         return round(ask, 2)
 
     async def manage(self, spot: float, last_bar: Optional[Bar]) -> None:
